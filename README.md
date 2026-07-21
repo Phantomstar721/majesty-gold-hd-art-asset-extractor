@@ -126,10 +126,3 @@ human-readable `buildings/sprites/` folders.
 These guide images are still generated from extracted assets, not screenshots.
 They do not fully reproduce Majesty's renderer, especially for placed buildings
 whose shadows/blend pixels are treated specially in game.
-
-## Notes
-
-This uses the same reverse-engineered CAM, IMAG, TILE, and SPLT format knowledge
-captured in the local BrandonWill Majesty reference repo and our
-`majesty-cam-tool` work. It is currently an extraction/reference workflow, not a
-general-purpose editor.
