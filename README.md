@@ -16,8 +16,9 @@ The extractor focuses on art that is useful for modding and reference:
 - Weapon, armor, item, and spell icons
 - Spell, projectile, and overlay effect sprites
 
-It intentionally avoids broad menu dumps, dialog-panel chrome, terrain, and map
-tiles unless a specific interface record is needed for icons or profile art.
+Known assets are sorted into specific folders. Records that can be decoded but
+do not match a known category are kept under `other/` instead of being thrown
+away.
 
 ## Setup
 
@@ -72,12 +73,25 @@ output/assets/
   profile_art/heroes/
   profile_art/monsters/
   profile_art/buildings/
+  other/main/
+  other/interface/
+  _previews/
   _manifest.csv
 ```
 
 Each extracted record gets its own folder. Animation frames are saved as PNGs
 with the image-set name, direction slot, frame number, and source TILE index in
 the filename.
+
+`_previews/` contains quick contact-sheet PNGs for sprite-heavy records. These
+are not perfect in-game reconstructions, but they upscale representative
+standing/active/build frames so a human can quickly recognize a hero, monster,
+building, lair, or effect without opening dozens of tiny frame files.
+
+Placed building art is mostly stored as non-directional TILE references rather
+than hero-style directional animation frames. The extractor handles both paths:
+directional records become frame PNGs, and non-directional building states
+become variant PNGs such as `Active_variant00_tile00931.png`.
 
 ## Notes
 

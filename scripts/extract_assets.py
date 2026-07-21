@@ -103,25 +103,6 @@ CURATED_INTERFACE_RECORDS = {
     "IX93": "icons/items",
 }
 
-SKIP_NAME_PARTS = {
-    "placeholder",
-    "selection",
-    "flag_bracket",
-    "signpost",
-    "goblin marker",
-    "goblin posts",
-    "monster mark",
-    "note_stump",
-    "obelisk",
-    "sign_fancy",
-    "sign_wood",
-    "stone_tablet",
-}
-
-SKIP_ID_PREFIXES = {
-    "NG",
-}
-
 MAIN_CAM_SOURCES = [
     ("base", Path("Data/maindata.cam")),
     ("expansion", Path("DataMX/mx_maindata.cam")),
@@ -296,11 +277,6 @@ def classify_xml(kind: str, image_id: str, can_use: set[str], name: str) -> str:
 
 def classify_imag_record(record_name: str, catalog: dict[str, CatalogEntry], full: bool) -> tuple[str, CatalogEntry | None] | None:
     image_id = record_name[:4]
-    lower_name = record_name.lower()
-    if image_id[:2] in SKIP_ID_PREFIXES:
-        return None
-    if any(part in lower_name for part in SKIP_NAME_PARTS):
-        return None
     if image_id in catalog:
         return catalog[image_id].category, catalog[image_id]
 
@@ -314,9 +290,7 @@ def classify_imag_record(record_name: str, catalog: dict[str, CatalogEntry], ful
         return "buildings/lairs", None
     if image_id[:2] in {"XR", "WR", "CR", "DR", "HR", "MR", "NR", "PR", "QR", "SR", "TR", "LR"}:
         return "spell_effects", None
-    if full:
-        return "uncategorized", None
-    return None
+    return "other/main", None
 
 
 def parse_anim_set(blob: bytes) -> list[tuple[int, str, int]]:
@@ -495,6 +469,9 @@ def tile_v3_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
         return None
     width = int(decoded["width"])
     height = int(decoded["height"])
+    header_width = u16(tile_data, 4)
+    if width > 4096 and header_width > 0:
+        width = header_width
     if width <= 0 or height <= 0:
         return None
     palette = load_palette(palette_section, int(decoded["palette_id"])) if palette_section else None
@@ -502,15 +479,18 @@ def tile_v3_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
     for y, segments in enumerate(decoded["rows"]):
         for x_start, pixels in segments:
             for dx, index in enumerate(pixels):
+                x = x_start + dx
+                if x < 0 or x >= width:
+                    continue
                 if index == 0:
                     continue
                 if palette:
                     red, green, blue = palette[index]
                     if red > 150 and green < 80 and blue > 150 and abs(red - blue) < 60:
                         continue
-                    image.putpixel((x_start + dx, y), (red, green, blue, 255))
+                    image.putpixel((x, y), (red, green, blue, 255))
                 else:
-                    image.putpixel((x_start + dx, y), (index, index, index, 255))
+                    image.putpixel((x, y), (index, index, index, 255))
     bbox = image.getbbox()
     return image.crop(bbox) if bbox else image
 
@@ -573,6 +553,7 @@ def export_imag_record(
 
         record_dir = output_root / category / folder_name
         directions = parse_directional_frame_descriptor(record.data, rel_off)
+        directional_written = 0
         for direction in directions:
             slot = int(direction["slot"])
             for frame_index, tile_index in enumerate(direction["tile_indices"]):
@@ -600,6 +581,21 @@ def export_imag_record(
                     }
                 )
                 written += 1
+                directional_written += 1
+        if directional_written == 0:
+            next_off = image_sets[set_index + 1][2] if set_index + 1 < len(image_sets) else len(record.data)
+            images = interface_images_for_set(record.data, rel_off, next_off, category, tile_section, splt_section)
+            written += write_images(
+                source_label,
+                record,
+                category,
+                catalog_entry,
+                set_name,
+                images,
+                output_root,
+                manifest,
+                folder_name,
+            )
     return written
 
 
@@ -770,6 +766,7 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
                 records_done += 1
                 if limit is not None and records_done >= limit:
                     write_manifest(output_root, manifest)
+                    create_previews(output_root, manifest)
                     return total
 
     interface_palette_fallback: CamSection | None = None
@@ -784,18 +781,20 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
         for record in imag.entries:
             category = CURATED_INTERFACE_RECORDS.get(record.display_name[:4])
             if category is None and not full:
-                continue
+                category = "other/interface"
             if category is None:
-                category = "interface_misc"
+                category = "other/interface"
             count = export_interface_record(source_label, record, category, tile, effective_palette, output_root, manifest)
             if count:
                 total += count
                 records_done += 1
                 if limit is not None and records_done >= limit:
                     write_manifest(output_root, manifest)
+                    create_previews(output_root, manifest)
                     return total
 
     write_manifest(output_root, manifest)
+    create_previews(output_root, manifest)
     return total
 
 
@@ -817,6 +816,112 @@ def write_manifest(output_root: Path, manifest: list[dict[str, object]]) -> None
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(manifest)
+
+
+def create_previews(output_root: Path, manifest: list[dict[str, object]]) -> int:
+    groups: dict[tuple[str, str], list[dict[str, object]]] = {}
+    preview_categories = {
+        "heroes/sprites",
+        "monsters/sprites",
+        "buildings/sprites",
+        "buildings/lairs",
+        "spell_effects",
+        "other/main",
+    }
+    for row in manifest:
+        category = str(row["category"])
+        if category not in preview_categories:
+            continue
+        groups.setdefault((category, str(row["record"])), []).append(row)
+
+    written = 0
+    for (category, record), rows in groups.items():
+        selected = select_preview_rows(rows)
+        if not selected:
+            continue
+        images = []
+        for row in selected:
+            path = output_root / str(row["png"])
+            if not path.exists():
+                continue
+            try:
+                images.append((row, Image.open(path).convert("RGBA")))
+            except OSError:
+                continue
+        if not images:
+            continue
+        preview = build_contact_sheet(images)
+        out_dir = output_root / "_previews" / category
+        out_dir.mkdir(parents=True, exist_ok=True)
+        preview.save(out_dir / f"{safe_name(record)}.png")
+        written += 1
+    return written
+
+
+def select_preview_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    priorities = [
+        "Stand",
+        "Active",
+        "Inactive",
+        "Walk",
+        "Build",
+        "Interface",
+        "Attack",
+        "Cast",
+        "Die",
+    ]
+    by_set: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        by_set.setdefault(str(row["set"]), []).append(row)
+
+    chosen: list[dict[str, object]] = []
+    for prefix in priorities:
+        for set_name in sorted(by_set):
+            if set_name == prefix or set_name.startswith(f"{prefix}-"):
+                chosen.extend(by_set[set_name][:8])
+                if len(chosen) >= 8:
+                    return chosen[:8]
+        if chosen:
+            return chosen[:8]
+    return rows[:8]
+
+
+def build_contact_sheet(images: list[tuple[dict[str, object], Image.Image]]) -> Image.Image:
+    if len(images) == 1:
+        cell_w = 360
+        cell_h = 280
+    else:
+        cell_w = 192
+        cell_h = 160
+    label_h = 18
+    cols = min(4, max(1, len(images)))
+    rows = (len(images) + cols - 1) // cols
+    sheet = Image.new("RGBA", (cols * cell_w, rows * (cell_h + label_h)), (28, 28, 28, 255))
+
+    for index, (row, image) in enumerate(images):
+        col = index % cols
+        row_index = index // cols
+        x = col * cell_w
+        y = row_index * (cell_h + label_h)
+        tile = Image.new("RGBA", (cell_w, cell_h), (28, 28, 28, 255))
+        scaled = image.copy()
+        max_dim = max(scaled.size)
+        if max_dim and max_dim < 96:
+            factor = max(2, min(6, 96 // max_dim))
+            scaled = scaled.resize((scaled.width * factor, scaled.height * factor), Image.Resampling.NEAREST)
+        scaled.thumbnail((cell_w - 8, cell_h - 8), Image.Resampling.NEAREST)
+        tile.alpha_composite(scaled, ((cell_w - scaled.width) // 2, (cell_h - scaled.height) // 2))
+        sheet.alpha_composite(tile, (x, y))
+        label = f"{row['set']} {row['frame']}"
+        draw_label(sheet, label[:24], x + 4, y + cell_h + 2)
+    return sheet
+
+
+def draw_label(image: Image.Image, text: str, x: int, y: int) -> None:
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(image)
+    draw.text((x, y), text, fill=(230, 230, 230, 255))
 
 
 def make_zip(output_root: Path) -> Path:
