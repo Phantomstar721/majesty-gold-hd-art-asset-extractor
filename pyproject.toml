@@ -1,5 +1,5 @@
 [project]
-name = "majesty-gold-hd-asset-spelunker"
+name = "majesty-gold-hd-art-asset-extractor"
 version = "0.1.0"
 description = "Local-only Majesty Gold HD art asset extractor and organizer."
 requires-python = ">=3.9"

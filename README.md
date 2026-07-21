@@ -1,10 +1,12 @@
-# Majesty Gold HD Asset Spelunker
+# Majesty Gold HD Art Asset Extractor
 
 Local-only extractor for making a private PNG reference library from an
 installed copy of **Majesty Gold HD**.
 
-This repo contains tooling only. Do not commit extracted game art, generated
-PNGs, or packaged asset zips.
+**Important:** this repository contains tooling only. It does not include,
+redistribute, or publish Majesty game assets. The extractor reads files from
+your own local Majesty HD installation and writes private local output under
+`output/`, which is gitignored.
 
 ## Scope
 
@@ -23,7 +25,7 @@ away.
 ## Setup
 
 ```powershell
-cd C:\Users\bterr\source\repos\majesty-gold-hd-asset-spelunker
+cd C:\Users\bterr\source\repos\majesty-gold-hd-art-asset-extractor
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 ```
@@ -49,8 +51,8 @@ By default the script auto-discovers Majesty HD from:
 
 By default, generated output goes to `output\assets` next to the unpacked
 extractor folder. In other words, if you unzip this tool to
-`D:\Tools\majesty-gold-hd-asset-spelunker`, the default output is
-`D:\Tools\majesty-gold-hd-asset-spelunker\output\assets`.
+`D:\Tools\majesty-gold-hd-art-asset-extractor`, the default output is
+`D:\Tools\majesty-gold-hd-art-asset-extractor\output\assets`.
 
 Useful options:
 
