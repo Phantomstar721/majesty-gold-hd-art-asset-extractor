@@ -76,6 +76,7 @@ output/assets/
   other/main/
   other/interface/
   _previews/
+  guide_art/
   _manifest.csv
 ```
 
@@ -92,6 +93,22 @@ Placed building art is mostly stored as non-directional TILE references rather
 than hero-style directional animation frames. The extractor handles both paths:
 directional records become frame PNGs, and non-directional building states
 become variant PNGs such as `Active_variant00_tile00931.png`.
+
+Building records also contain many numeric image sets that appear to be support
+layers, masks, rubble pieces, animation internals, or other not-yet-named data.
+Those are preserved under `other/main/` instead of being mixed into the
+human-readable `buildings/sprites/` folders.
+
+`guide_art/` contains convenience picks for local guide/reference use:
+
+- `guide_art/profiles/` prefers profile/dialog art when the game has it.
+- `guide_art/sprites/` picks one representative transparent sprite frame.
+- `guide_art/sprite_cards/` places that representative sprite on a neutral
+  background so shadows and dark pixels are easier to read.
+
+These guide images are still generated from extracted assets, not screenshots.
+They do not fully reproduce Majesty's renderer, especially for placed buildings
+whose shadows/blend pixels are treated specially in game.
 
 ## Notes
 

@@ -113,6 +113,34 @@ INTERFACE_CAM_SOURCES = [
     ("expansion_interface", Path("DataMX/mx_interfacedata.cam")),
 ]
 
+KNOWN_BUILDING_SET_IDS = {
+    80,
+    81,
+    82,
+    83,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    192,
+    193,
+    194,
+    195,
+    208,
+    209,
+    210,
+    211,
+    224,
+    240,
+    400,
+    1000,
+    1002,
+}
+
 
 @dataclass(frozen=True)
 class CamEntry:
@@ -486,6 +514,8 @@ def tile_v3_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
                     continue
                 if palette:
                     red, green, blue = palette[index]
+                    if index >= 248:
+                        continue
                     if red > 150 and green < 80 and blue > 150 and abs(red - blue) < 60:
                         continue
                     image.putpixel((x, y), (red, green, blue, 255))
@@ -551,7 +581,8 @@ def export_imag_record(
             )
             continue
 
-        record_dir = output_root / category / folder_name
+        export_category = classify_main_sprite_set(category, set_id)
+        record_dir = output_root / export_category / folder_name
         directions = parse_directional_frame_descriptor(record.data, rel_off)
         directional_written = 0
         for direction in directions:
@@ -568,7 +599,7 @@ def export_imag_record(
                 image.save(out_path)
                 manifest.append(
                     {
-                        "category": category,
+                        "category": export_category,
                         "source": source_label,
                         "image_id": record.display_name[:4],
                         "record": record.display_name,
@@ -584,11 +615,14 @@ def export_imag_record(
                 directional_written += 1
         if directional_written == 0:
             next_off = image_sets[set_index + 1][2] if set_index + 1 < len(image_sets) else len(record.data)
-            images = interface_images_for_set(record.data, rel_off, next_off, category, tile_section, splt_section)
+            if category.startswith("buildings/") and export_category == category:
+                images = building_state_images_for_set(record.data, rel_off, next_off, tile_section, splt_section)
+            else:
+                images = interface_images_for_set(record.data, rel_off, next_off, export_category, tile_section, splt_section)
             written += write_images(
                 source_label,
                 record,
-                category,
+                export_category,
                 catalog_entry,
                 set_name,
                 images,
@@ -597,6 +631,12 @@ def export_imag_record(
                 folder_name,
             )
     return written
+
+
+def classify_main_sprite_set(category: str, set_id: int) -> str:
+    if category.startswith("buildings/") and set_id not in KNOWN_BUILDING_SET_IDS:
+        return "other/main"
+    return category
 
 
 def classify_main_interface_set(sprite_category: str, set_id: int) -> str | None:
@@ -721,6 +761,39 @@ def interface_images_for_set(
     return found
 
 
+def building_state_images_for_set(
+    blob: bytes,
+    rel_off: int,
+    next_off: int,
+    tile_section: CamSection,
+    palette_section: CamSection | None,
+) -> list[tuple[int, Image.Image]]:
+    if rel_off < 0 or next_off <= rel_off or next_off > len(blob):
+        return []
+    if next_off - rel_off < 100:
+        return []
+
+    tile_count = max(1, min(32, u16(blob, rel_off + 74)))
+    found: list[tuple[int, Image.Image]] = []
+    seen: set[int] = set()
+    cursor = next_off - 4
+
+    while cursor >= rel_off + 88 and len(found) < tile_count:
+        tile_index = u32(blob, cursor)
+        prefix = u32(blob, cursor - 4) if cursor - 4 >= rel_off else 0
+        if 0 < tile_index < len(tile_section.entries) and prefix == 0 and tile_index not in seen:
+            image = tile_to_image(tile_section.entries[tile_index].data, palette_section)
+            if image is not None and image.width >= 16 and image.height >= 16:
+                found.append((tile_index, image))
+                seen.add(tile_index)
+                cursor -= 8
+                continue
+        cursor -= 4
+
+    found.reverse()
+    return found
+
+
 def looks_like_interface_asset(category: str, image: Image.Image) -> bool:
     width, height = image.size
     if category.startswith("profile_art"):
@@ -767,6 +840,7 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
                 if limit is not None and records_done >= limit:
                     write_manifest(output_root, manifest)
                     create_previews(output_root, manifest)
+                    create_guide_art(output_root, manifest)
                     return total
 
     interface_palette_fallback: CamSection | None = None
@@ -791,10 +865,12 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
                 if limit is not None and records_done >= limit:
                     write_manifest(output_root, manifest)
                     create_previews(output_root, manifest)
+                    create_guide_art(output_root, manifest)
                     return total
 
     write_manifest(output_root, manifest)
     create_previews(output_root, manifest)
+    create_guide_art(output_root, manifest)
     return total
 
 
@@ -856,6 +932,88 @@ def create_previews(output_root: Path, manifest: list[dict[str, object]]) -> int
         preview.save(out_dir / f"{safe_name(record)}.png")
         written += 1
     return written
+
+
+def create_guide_art(output_root: Path, manifest: list[dict[str, object]]) -> int:
+    written = 0
+    by_record: dict[str, list[dict[str, object]]] = {}
+    for row in manifest:
+        by_record.setdefault(str(row["record"]), []).append(row)
+
+    for record, rows in by_record.items():
+        profile_row = pick_guide_profile(rows)
+        sprite_row = pick_guide_sprite(rows)
+        for label, row in (("profiles", profile_row), ("sprites", sprite_row)):
+            if row is None:
+                continue
+            src = output_root / str(row["png"])
+            if not src.exists():
+                continue
+            try:
+                image = Image.open(src).convert("RGBA")
+            except OSError:
+                continue
+            image = scale_guide_image(image)
+            group = guide_group(str(row["category"]))
+            out_dir = output_root / "guide_art" / label / group
+            out_dir.mkdir(parents=True, exist_ok=True)
+            image.save(out_dir / f"{safe_name(record)}.png")
+            written += 1
+            if label == "sprites":
+                card_dir = output_root / "guide_art" / "sprite_cards" / group
+                card_dir.mkdir(parents=True, exist_ok=True)
+                sprite_card(image, str(row["category"])).save(card_dir / f"{safe_name(record)}.png")
+                written += 1
+    return written
+
+
+def pick_guide_profile(rows: list[dict[str, object]]) -> dict[str, object] | None:
+    profile_rows = [row for row in rows if str(row["category"]).startswith("profile_art/")]
+    if not profile_rows:
+        return None
+    return sorted(profile_rows, key=lambda row: (str(row["set"]) != "Interface", str(row["png"])))[0]
+
+
+def pick_guide_sprite(rows: list[dict[str, object]]) -> dict[str, object] | None:
+    sprite_categories = {"heroes/sprites", "monsters/sprites", "buildings/sprites", "buildings/lairs", "spell_effects"}
+    sprite_rows = [row for row in rows if str(row["category"]) in sprite_categories]
+    if not sprite_rows:
+        return None
+    return select_preview_rows(sprite_rows)[0]
+
+
+def guide_group(category: str) -> str:
+    if category == "buildings/lairs":
+        return "lairs"
+    if category.startswith("profile_art/"):
+        return safe_name(category.split("/", 1)[1])
+    if "/" in category:
+        return safe_name(category.split("/", 1)[0])
+    return safe_name(category)
+
+
+def scale_guide_image(image: Image.Image) -> Image.Image:
+    max_dim = max(image.size)
+    if 0 < max_dim < 128:
+        factor = max(2, min(6, 128 // max_dim))
+        return image.resize((image.width * factor, image.height * factor), Image.Resampling.NEAREST)
+    return image
+
+
+def sprite_card(image: Image.Image, category: str) -> Image.Image:
+    pad = 24
+    bg_color = (92, 110, 64, 255) if category.startswith("buildings/") else (28, 28, 28, 255)
+    alt_color = (102, 122, 70, 255) if category.startswith("buildings/") else (36, 36, 36, 255)
+    card = Image.new("RGBA", (image.width + pad * 2, image.height + pad * 2), bg_color)
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(card)
+    for y in range(0, card.height, 16):
+        for x in range(0, card.width, 16):
+            if (x // 16 + y // 16) % 2 == 0:
+                draw.rectangle([x, y, x + 15, y + 15], fill=alt_color)
+    card.alpha_composite(image, (pad, pad))
+    return card
 
 
 def select_preview_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
