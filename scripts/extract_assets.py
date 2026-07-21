@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import shutil
@@ -12,7 +13,9 @@ import xml.etree.ElementTree as ET
 from PIL import Image
 
 
+TOOL_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Majesty HD")
+DEFAULT_OUT = TOOL_ROOT / "output" / "assets"
 
 MAGIC = b"CYLBPC  \x01\x00\x01\x00"
 ANIM_HEADER_SIZE = 0x14
@@ -566,6 +569,76 @@ def get_sections(archive: CamArchive) -> tuple[CamSection | None, CamSection | N
     return by_ext.get("IMAG"), by_ext.get("TILE"), by_ext.get("SPLT") or by_ext.get("PALT")
 
 
+def resolve_game_path(explicit_game: Path | None) -> Path:
+    if explicit_game is not None:
+        return explicit_game
+
+    for candidate in discover_game_paths():
+        if is_game_folder(candidate):
+            return candidate
+
+    searched = "\n".join(f"  - {path}" for path in discover_game_paths())
+    raise SystemExit(
+        "Could not find Majesty HD automatically. Use --game with the install folder.\n"
+        f"Searched:\n{searched}"
+    )
+
+
+def discover_game_paths() -> list[Path]:
+    candidates: list[Path] = []
+
+    env_game = os.environ.get("MAJESTY_HD_DIR")
+    if env_game:
+        candidates.append(Path(env_game))
+
+    candidates.append(DEFAULT_GAME)
+
+    for steam_root in steam_roots():
+        candidates.append(steam_root / "steamapps" / "common" / "Majesty HD")
+        library_vdf = steam_root / "steamapps" / "libraryfolders.vdf"
+        for library in steam_libraries_from_vdf(library_vdf):
+            candidates.append(library / "steamapps" / "common" / "Majesty HD")
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key not in seen:
+            unique.append(candidate)
+            seen.add(key)
+    return unique
+
+
+def steam_roots() -> list[Path]:
+    roots = [
+        Path(r"C:\Program Files (x86)\Steam"),
+        Path(r"C:\Program Files\Steam"),
+    ]
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        root = os.environ.get(env_name)
+        if root:
+            roots.append(Path(root) / "Steam")
+    return roots
+
+
+def steam_libraries_from_vdf(path: Path) -> list[Path]:
+    if not path.exists():
+        return []
+    libraries: list[Path] = []
+    pattern = re.compile(r'"path"\s+"([^"]+)"', re.IGNORECASE)
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    for match in pattern.finditer(text):
+        libraries.append(Path(match.group(1).replace("\\\\", "\\")))
+    return libraries
+
+
+def is_game_folder(path: Path) -> bool:
+    return (path / "Data" / "maindata.cam").exists() and (path / "Data" / "interfacedata.cam").exists()
+
+
 def export_imag_record(
     source_label: str,
     record: CamEntry,
@@ -1110,20 +1183,21 @@ def make_zip(output_root: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Extract local Majesty Gold HD art assets to PNG.")
-    parser.add_argument("--game", type=Path, default=DEFAULT_GAME, help="Majesty Gold HD install folder")
-    parser.add_argument("--out", type=Path, default=Path("output/assets"), help="Output folder")
+    parser.add_argument("--game", type=Path, help="Majesty Gold HD install folder; auto-discovered if omitted")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output folder")
     parser.add_argument("--full", action="store_true", help="Also extract uncategorized/main interface records")
     parser.add_argument("--limit", type=int, help="Stop after this many IMAG records with extracted PNGs")
     parser.add_argument("--zip", action="store_true", help="Create a local zip next to the output folder")
     args = parser.parse_args()
 
-    if not args.game.exists():
-        raise SystemExit(f"Game folder not found: {args.game}")
+    game = resolve_game_path(args.game)
+    output = args.out if args.out.is_absolute() else TOOL_ROOT / args.out
 
-    total = extract_assets(args.game, args.out, args.full, args.limit)
-    print(f"Extracted {total} PNG files to {args.out}")
+    total = extract_assets(game, output, args.full, args.limit)
+    print(f"Game folder: {game}")
+    print(f"Extracted {total} PNG files to {output}")
     if args.zip:
-        zip_path = make_zip(args.out)
+        zip_path = make_zip(output)
         print(f"Wrote local zip: {zip_path}")
     return 0
 

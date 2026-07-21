@@ -28,15 +28,29 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 ```
 
+On Windows, `run_extractor.cmd` will create/use `.venv`, install requirements,
+and run the extractor:
+
+```powershell
+.\run_extractor.cmd
+```
+
 ## Extract
 
 ```powershell
 .\.venv\Scripts\python scripts\extract_assets.py
 ```
 
-By default the script looks for the Steam install at:
+By default the script auto-discovers Majesty HD from:
 
-`C:\Program Files (x86)\Steam\steamapps\common\Majesty HD`
+- `MAJESTY_HD_DIR`, if that environment variable is set
+- the default Steam path, `C:\Program Files (x86)\Steam\steamapps\common\Majesty HD`
+- Steam library folders listed in `steamapps\libraryfolders.vdf`
+
+By default, generated output goes to `output\assets` next to the unpacked
+extractor folder. In other words, if you unzip this tool to
+`D:\Tools\majesty-gold-hd-asset-spelunker`, the default output is
+`D:\Tools\majesty-gold-hd-asset-spelunker\output\assets`.
 
 Useful options:
 
@@ -45,11 +59,12 @@ Useful options:
 .\.venv\Scripts\python scripts\extract_assets.py --out output\assets --zip
 .\.venv\Scripts\python scripts\extract_assets.py --limit 5
 .\.venv\Scripts\python scripts\extract_assets.py --full
+.\run_extractor.cmd --zip
 ```
 
-Generated output goes under `output/` by default and is gitignored. The
-extractor clears the selected output folder each run, and refuses obvious unsafe
-targets such as the game folder or repo root.
+Generated output goes under `output/` by default and is gitignored. The extractor
+clears the selected output folder each run, and refuses obvious unsafe targets
+such as the game folder or repo root.
 
 `--zip` creates a local zip next to the output folder. Keep that zip private
 unless you have permission to redistribute the extracted assets.
