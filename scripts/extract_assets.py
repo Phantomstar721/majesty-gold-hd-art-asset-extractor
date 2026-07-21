@@ -457,12 +457,15 @@ def tile_v1_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
 
     height = u16(tile_data, 2)
     width = u16(tile_data, 4)
+    row_stride = u16(tile_data, 6)
     transparent_index = u16(tile_data, 16) & 0xFF
     palette_mode = u16(tile_data, 20)
     palette_value = u32(tile_data, 22)
 
     if width <= 0 or height <= 0:
         return None
+    if row_stride == width * 2 and 26 + height * row_stride <= len(tile_data):
+        return tile_v1_rgb565_to_image(tile_data, width, height, row_stride)
     pixel_count = width * height
     if 26 + pixel_count > len(tile_data):
         return None
@@ -486,6 +489,23 @@ def tile_v1_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
             red, green, blue = palette[index]
             if red > 150 and green < 80 and blue > 150 and abs(red - blue) < 60:
                 continue
+            image.putpixel((x, y), (red, green, blue, 255))
+    bbox = image.getbbox()
+    return image.crop(bbox) if bbox else image
+
+
+def tile_v1_rgb565_to_image(tile_data: bytes, width: int, height: int, row_stride: int) -> Image.Image | None:
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    pixels_start = 26
+    for y in range(height):
+        row_start = pixels_start + y * row_stride
+        for x in range(width):
+            value = u16(tile_data, row_start + x * 2)
+            if value == 0:
+                continue
+            red = ((value >> 11) & 0x1F) * 255 // 31
+            green = ((value >> 5) & 0x3F) * 255 // 63
+            blue = (value & 0x1F) * 255 // 31
             image.putpixel((x, y), (red, green, blue, 255))
     bbox = image.getbbox()
     return image.crop(bbox) if bbox else image
