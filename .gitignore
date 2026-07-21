@@ -1,0 +1,8 @@
+/.venv/
+/local/
+/output/
+/dist/
+*.zip
+__pycache__/
+*.pyc
+
