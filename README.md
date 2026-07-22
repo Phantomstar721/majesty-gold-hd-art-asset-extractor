@@ -1,7 +1,7 @@
 # Majesty Gold HD Art Asset Extractor
 
-Local-only extractor for making a private PNG reference library from an
-installed copy of **Majesty Gold HD**.
+Tooling for making a private PNG reference library from an installed copy of
+**Majesty Gold HD**.
 
 **Important:** this repository contains tooling only. It does not include,
 redistribute, or publish Majesty game assets. The extractor reads files from
@@ -25,7 +25,7 @@ away.
 ## Setup
 
 ```powershell
-cd C:\Users\bterr\source\repos\majesty-gold-hd-art-asset-extractor
+cd path\to\majesty-gold-hd-art-asset-extractor
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 ```
