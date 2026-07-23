@@ -402,9 +402,11 @@ def parse_directional_frame_descriptor(blob: bytes, rel_off: int) -> list[dict[s
 
 
 def decode_tile_v3(tile_data: bytes) -> dict[str, object] | None:
+    """Decode TILE v3 RLE. On-disk x is exclusive end; returned segments use start."""
     if len(tile_data) < 26 or u16(tile_data, 0) != 3:
         return None
     height = u16(tile_data, 2)
+    header_width = u16(tile_data, 4)
     palette_id = u32(tile_data, 22)
     offset_base = 26
     if height <= 0 or offset_base + height * 4 > len(tile_data):
@@ -412,7 +414,7 @@ def decode_tile_v3(tile_data: bytes) -> dict[str, object] | None:
 
     offsets = [u32(tile_data, offset_base + row * 4) for row in range(height)]
     rows = []
-    max_x = 0
+    max_end = 0
     for row in range(height):
         start = offset_base + offsets[row]
         end = offset_base + offsets[row + 1] if row + 1 < height else len(tile_data)
@@ -423,20 +425,24 @@ def decode_tile_v3(tile_data: bytes) -> dict[str, object] | None:
         segments = []
         pos = 0
         while pos + 4 <= len(row_data):
-            x_pos = u16(row_data, pos)
+            x_end = u16(row_data, pos)
             count_word = u16(row_data, pos + 2)
             pos += 4
             count = count_word & 0xFF
             flags = (count_word >> 8) & 0xFF
-            if count > 0 and pos + count <= len(row_data):
+            if count > 0 and count <= x_end and pos + count <= len(row_data):
                 pixels = list(row_data[pos : pos + count])
                 pos += count
-                segments.append((x_pos, pixels))
-                max_x = max(max_x, x_pos + count)
+                x_start = x_end - count
+                segments.append((x_start, pixels))
+                max_end = max(max_end, x_end)
             if flags & 0x80:
                 break
         rows.append(segments)
-    return {"width": max_x, "height": height, "palette_id": palette_id, "rows": rows}
+    width = header_width if header_width > 0 else max_end
+    if max_end > width:
+        width = max_end
+    return {"width": width, "height": height, "palette_id": palette_id, "rows": rows}
 
 
 def load_palette(palette_section: CamSection, palette_id: int) -> list[tuple[int, int, int]] | None:
@@ -520,9 +526,6 @@ def tile_v3_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
         return None
     width = int(decoded["width"])
     height = int(decoded["height"])
-    header_width = u16(tile_data, 4)
-    if width > 4096 and header_width > 0:
-        width = header_width
     if width <= 0 or height <= 0:
         return None
     palette = load_palette(palette_section, int(decoded["palette_id"])) if palette_section else None
