@@ -26,12 +26,16 @@ def encode_tile_v3(
     Encode a (height, width) grid of palette indices into TILE v3 bytes.
     On-disk X is exclusive end: x_end = start + count.
     """
-    import numpy as np
-
-    pixels = np.array(pixel_indices, dtype=np.uint8)
-    height, width = pixels.shape
+    pixels = [[int(value) & 0xFF for value in row] for row in pixel_indices]
+    height = len(pixels)
+    width = max((len(row) for row in pixels), default=0)
+    if height <= 0 or width <= 0:
+        raise ValueError("Cannot encode an empty TILE v3 image")
+    for row in pixels:
+        if len(row) != width:
+            raise ValueError("Cannot encode ragged TILE v3 rows")
     if header_w2 <= 0:
-        header_w2 = int(width)
+        header_w2 = width
 
     row_blobs: list[bytes] = []
     for y in range(height):
