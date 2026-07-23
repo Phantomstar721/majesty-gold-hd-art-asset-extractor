@@ -322,9 +322,53 @@ def classify_imag_record(record_name: str, catalog: dict[str, CatalogEntry], ful
         return "buildings/lairs", None
     if image_id[:2] in {"XR", "WR", "CR", "DR", "HR", "MR", "NR", "PR", "QR", "SR", "TR", "LR"}:
         return "spell_effects", None
+    if is_loose_spell_effect_record(record_name):
+        return "spell_effects", None
     if full:
         return "other/main", None
     return None
+
+
+def is_loose_spell_effect_record(record_name: str) -> bool:
+    image_id = record_name[:4]
+    prefix = image_id[:2].upper()
+    if prefix == "WP":
+        return True
+    if prefix != "XL":
+        return False
+    lower = record_name.lower()
+    spell_terms = {
+        "adept",
+        "blast",
+        "breath",
+        "chain",
+        "earthquake",
+        "effect",
+        "effct",
+        "farseeing",
+        "fire",
+        "flame",
+        "flamming",
+        "frost",
+        "heal",
+        "horrify",
+        "meteor",
+        "miss",
+        "part",
+        "placehold_spell",
+        "power",
+        "project",
+        "shock",
+        "smoke",
+        "spell",
+        "storm",
+        "teleport",
+        "terrify",
+        "tower",
+        "wind",
+        "wiz",
+    }
+    return any(term in lower for term in spell_terms)
 
 
 def parse_anim_set(blob: bytes) -> list[tuple[int, str, int]]:
