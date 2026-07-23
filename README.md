@@ -18,9 +18,10 @@ The extractor focuses on art that is useful for modding and reference:
 - Weapon, armor, item, and spell icons
 - Spell, projectile, and overlay effect sprites
 
-Known assets are sorted into specific folders. Records that can be decoded but
-do not match a known category are kept under `other/` instead of being thrown
-away.
+Known assets are sorted into specific folders. Unknown main/interface records
+and most extra animation frames are skipped by default because they produce a
+large amount of noisy output; use `--full` if you want exhaustive dumps under
+`other/main/` and `other/interface/`.
 
 ## Setup
 
@@ -64,6 +65,12 @@ Useful options:
 .\run_extractor.cmd --zip
 ```
 
+The default run is intentionally fast and curated. It exports profile art,
+icons, representative hero/monster/building/lair sprites, representative spell
+effects, `_previews/`, and `_manifest.csv`. Use `--full` only when you want the
+large exhaustive dump of all animation frames, support layers, and uncategorized
+records.
+
 Generated output goes under `output/` by default and is gitignored. The extractor
 clears the selected output folder each run, and refuses obvious unsafe targets
 such as the game folder or repo root.
@@ -90,10 +97,7 @@ output/assets/
   profile_art/heroes/
   profile_art/monsters/
   profile_art/buildings/
-  other/main/
-  other/interface/
   _previews/
-  guide_art/
   _manifest.csv
 ```
 
@@ -113,19 +117,9 @@ become variant PNGs such as `Active_variant00_tile00931.png`.
 
 Building records also contain many numeric image sets that appear to be support
 layers, masks, rubble pieces, animation internals, or other not-yet-named data.
-Those are preserved under `other/main/` instead of being mixed into the
-human-readable `buildings/sprites/` folders.
-
-`guide_art/` contains convenience picks for local guide/reference use:
-
-- `guide_art/profiles/` prefers profile/dialog art when the game has it.
-- `guide_art/sprites/` picks one representative transparent sprite frame.
-- `guide_art/sprite_cards/` places that representative sprite on a neutral
-  background so shadows and dark pixels are easier to read.
-
-These guide images are still generated from extracted assets, not screenshots.
-They do not fully reproduce Majesty's renderer, especially for placed buildings
-whose shadows/blend pixels are treated specially in game.
+Those are skipped during normal extraction instead of being mixed into the
+human-readable `buildings/sprites/` folders. Use `--full` to keep those records
+under `other/main/`.
 
 ## TILE format / AI re-art
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import struct
+import time
 import xml.etree.ElementTree as ET
 
 from PIL import Image
@@ -321,7 +322,9 @@ def classify_imag_record(record_name: str, catalog: dict[str, CatalogEntry], ful
         return "buildings/lairs", None
     if image_id[:2] in {"XR", "WR", "CR", "DR", "HR", "MR", "NR", "PR", "QR", "SR", "TR", "LR"}:
         return "spell_effects", None
-    return "other/main", None
+    if full:
+        return "other/main", None
+    return None
 
 
 def parse_anim_set(blob: bytes) -> list[tuple[int, str, int]]:
@@ -651,6 +654,7 @@ def export_imag_record(
     splt_section: CamSection | None,
     output_root: Path,
     manifest: list[dict[str, object]],
+    full: bool,
 ) -> int:
     image_sets = parse_anim_set(record.data)
     if not image_sets:
@@ -677,13 +681,17 @@ def export_imag_record(
             )
             continue
 
-        export_category = classify_main_sprite_set(category, set_id)
+        export_category = classify_main_sprite_set(category, set_id, full)
+        if export_category is None:
+            continue
         record_dir = output_root / export_category / folder_name
         directions = parse_directional_frame_descriptor(record.data, rel_off)
         directional_written = 0
         for direction in directions:
             slot = int(direction["slot"])
             for frame_index, tile_index in enumerate(direction["tile_indices"]):
+                if not full and frame_index > 0:
+                    continue
                 if tile_index < 0 or tile_index >= len(tile_section.entries):
                     continue
                 image = tile_to_image(tile_section.entries[tile_index].data, splt_section)
@@ -715,6 +723,8 @@ def export_imag_record(
                 images = building_state_images_for_set(record.data, rel_off, next_off, tile_section, splt_section)
             else:
                 images = interface_images_for_set(record.data, rel_off, next_off, export_category, tile_section, splt_section)
+            if not full:
+                images = images[:4]
             written += write_images(
                 source_label,
                 record,
@@ -729,9 +739,17 @@ def export_imag_record(
     return written
 
 
-def classify_main_sprite_set(category: str, set_id: int) -> str:
+def classify_main_sprite_set(category: str, set_id: int, full: bool) -> str | None:
     if category.startswith("buildings/") and set_id not in KNOWN_BUILDING_SET_IDS:
-        return "other/main"
+        return "other/main" if full else None
+    if full:
+        return category
+    if category in {"heroes/sprites", "monsters/sprites"}:
+        return category if set_id == 8 else None
+    if category in {"buildings/sprites", "buildings/lairs"}:
+        return category if set_id in {80, 192, 208} else None
+    if category == "spell_effects":
+        return category if set_id in {1, 8, 16, 128, 192, 2000, 2100, 2200} else None
     return category
 
 
@@ -900,9 +918,11 @@ def looks_like_interface_asset(category: str, image: Image.Image) -> bool:
 
 
 def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None) -> int:
+    started = time.perf_counter()
     catalog = parse_catalog(game)
     validate_output_root(game, output_root)
     if output_root.exists():
+        print(f"Clearing previous output: {output_root}", flush=True)
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -910,6 +930,7 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
     total = 0
     records_done = 0
 
+    print("Extracting game art records...", flush=True)
     for source_label, rel_path in MAIN_CAM_SOURCES:
         archive = read_cam(game / rel_path)
         imag, tile, splt = get_sections(archive)
@@ -929,16 +950,18 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
                 splt,
                 output_root,
                 manifest,
+                full,
             )
             if count:
                 total += count
                 records_done += 1
                 if limit is not None and records_done >= limit:
+                    print(f"Writing manifest and previews for {total} files...", flush=True)
                     write_manifest(output_root, manifest)
                     create_previews(output_root, manifest)
-                    create_guide_art(output_root, manifest)
                     return total
 
+    print("Extracting curated interface records...", flush=True)
     interface_palette_fallback: CamSection | None = None
     for source_label, rel_path in INTERFACE_CAM_SOURCES:
         archive = read_cam(game / rel_path)
@@ -951,7 +974,7 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
         for record in imag.entries:
             category = CURATED_INTERFACE_RECORDS.get(record.display_name[:4])
             if category is None and not full:
-                category = "other/interface"
+                continue
             if category is None:
                 category = "other/interface"
             count = export_interface_record(source_label, record, category, tile, effective_palette, output_root, manifest)
@@ -959,14 +982,16 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
                 total += count
                 records_done += 1
                 if limit is not None and records_done >= limit:
+                    print(f"Writing manifest and previews for {total} files...", flush=True)
                     write_manifest(output_root, manifest)
                     create_previews(output_root, manifest)
-                    create_guide_art(output_root, manifest)
                     return total
 
+    print(f"Writing manifest for {total} files...", flush=True)
     write_manifest(output_root, manifest)
+    print("Creating preview sheets...", flush=True)
     create_previews(output_root, manifest)
-    create_guide_art(output_root, manifest)
+    print(f"Extraction stages finished in {time.perf_counter() - started:.1f}s", flush=True)
     return total
 
 
@@ -1188,7 +1213,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Extract local Majesty Gold HD art assets to PNG.")
     parser.add_argument("--game", type=Path, help="Majesty Gold HD install folder; auto-discovered if omitted")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output folder")
-    parser.add_argument("--full", action="store_true", help="Also extract uncategorized/main interface records")
+    parser.add_argument("--full", action="store_true", help="Exhaustive extraction: all frames plus uncategorized main/interface records")
     parser.add_argument("--limit", type=int, help="Stop after this many IMAG records with extracted PNGs")
     parser.add_argument("--zip", action="store_true", help="Create a local zip next to the output folder")
     args = parser.parse_args()
@@ -1200,6 +1225,7 @@ def main() -> int:
     print(f"Game folder: {game}")
     print(f"Extracted {total} PNG files to {output}")
     if args.zip:
+        print("Creating local zip...", flush=True)
         zip_path = make_zip(output)
         print(f"Wrote local zip: {zip_path}")
     return 0
