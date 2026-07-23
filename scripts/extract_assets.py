@@ -342,9 +342,21 @@ def parse_anim_set(blob: bytes) -> list[tuple[int, str, int]]:
         rel_off = u32(blob, pos + 4)
         if rel_off >= len(blob):
             return []
-        sets.append((set_id, IMAGE_SET_NAMES.get(set_id, f"set-{set_id}"), rel_off))
+        normalized_set_id = image_set_base_id(set_id)
+        if set_id in IMAGE_SET_NAMES:
+            set_name = IMAGE_SET_NAMES[set_id]
+        elif normalized_set_id in IMAGE_SET_NAMES:
+            set_name = f"{IMAGE_SET_NAMES[normalized_set_id]}-{set_id >> 16}"
+        else:
+            set_name = f"set-{set_id}"
+        sets.append((set_id, set_name, rel_off))
         pos += IMAGE_SET_ENTRY_SIZE
     return sets
+
+
+def image_set_base_id(set_id: int) -> int:
+    base_id = set_id & 0xFFFF
+    return base_id if base_id else set_id
 
 
 def parse_directional_frame_descriptor(blob: bytes, rel_off: int) -> list[dict[str, object]]:
@@ -431,15 +443,14 @@ def decode_tile_v3(tile_data: bytes) -> dict[str, object] | None:
             x_end = u16(row_data, pos)
             count_word = u16(row_data, pos + 2)
             pos += 4
-            count = count_word & 0xFF
-            flags = (count_word >> 8) & 0xFF
+            count = count_word & 0x7FFF
             if count > 0 and count <= x_end and pos + count <= len(row_data):
                 pixels = list(row_data[pos : pos + count])
                 pos += count
                 x_start = x_end - count
                 segments.append((x_start, pixels))
                 max_end = max(max_end, x_end)
-            if flags & 0x80:
+            if count_word & 0x8000:
                 break
         rows.append(segments)
     width = header_width if header_width > 0 else max_end
@@ -461,6 +472,14 @@ def load_embedded_palette(data: bytes, offset: int) -> list[tuple[int, int, int]
     if offset < 0 or offset + 1032 > len(data):
         return None
     return [(data[offset + 8 + i * 4], data[offset + 9 + i * 4], data[offset + 10 + i * 4]) for i in range(256)]
+
+
+def is_palette_key_color(index: int, red: int, green: int, blue: int) -> bool:
+    if index >= 248:
+        return True
+    if red > 150 and green < 80 and blue > 150 and abs(red - blue) < 60:
+        return True
+    return green == 0 and red == blue and 120 <= red <= 140
 
 
 def tile_v1_to_image(tile_data: bytes, palette_section: CamSection | None) -> Image.Image | None:
@@ -499,7 +518,7 @@ def tile_v1_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
             if index == transparent_index:
                 continue
             red, green, blue = palette[index]
-            if red > 150 and green < 80 and blue > 150 and abs(red - blue) < 60:
+            if is_palette_key_color(index, red, green, blue):
                 continue
             image.putpixel((x, y), (red, green, blue, 255))
     bbox = image.getbbox()
@@ -543,9 +562,7 @@ def tile_v3_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
                     continue
                 if palette:
                     red, green, blue = palette[index]
-                    if index >= 248:
-                        continue
-                    if red > 150 and green < 80 and blue > 150 and abs(red - blue) < 60:
+                    if is_palette_key_color(index, red, green, blue):
                         continue
                     image.putpixel((x, y), (red, green, blue, 255))
                 else:
@@ -740,16 +757,17 @@ def export_imag_record(
 
 
 def classify_main_sprite_set(category: str, set_id: int, full: bool) -> str | None:
-    if category.startswith("buildings/") and set_id not in KNOWN_BUILDING_SET_IDS:
+    normalized_set_id = image_set_base_id(set_id)
+    if category.startswith("buildings/") and normalized_set_id not in KNOWN_BUILDING_SET_IDS:
         return "other/main" if full else None
     if full:
         return category
     if category in {"heroes/sprites", "monsters/sprites"}:
-        return category if set_id == 8 else None
+        return category if normalized_set_id == 8 else None
     if category in {"buildings/sprites", "buildings/lairs"}:
-        return category if set_id in {80, 192, 208} else None
+        return category if normalized_set_id in {80, 192, 208} else None
     if category == "spell_effects":
-        return category if set_id in {1, 8, 16, 128, 192, 2000, 2100, 2200} else None
+        return category if normalized_set_id in {1, 8, 16, 128, 192, 2000, 2100, 2200} else None
     return category
 
 
@@ -1033,11 +1051,8 @@ def create_previews(output_root: Path, manifest: list[dict[str, object]]) -> int
 
     written = 0
     for (category, record), rows in groups.items():
-        selected = select_preview_rows(rows)
-        if not selected:
-            continue
         images = []
-        for row in selected:
+        for row in rows:
             path = output_root / str(row["png"])
             if not path.exists():
                 continue
@@ -1047,7 +1062,10 @@ def create_previews(output_root: Path, manifest: list[dict[str, object]]) -> int
                 continue
         if not images:
             continue
-        preview = build_contact_sheet(images)
+        selected_images = select_preview_images(images)
+        if not selected_images:
+            continue
+        preview = build_contact_sheet(selected_images)
         out_dir = output_root / "_previews" / category
         out_dir.mkdir(parents=True, exist_ok=True)
         preview.save(out_dir / f"{safe_name(record)}.png")
@@ -1163,6 +1181,48 @@ def select_preview_rows(rows: list[dict[str, object]]) -> list[dict[str, object]
         if chosen:
             return chosen[:8]
     return rows[:8]
+
+
+def select_preview_images(images: list[tuple[dict[str, object], Image.Image]]) -> list[tuple[dict[str, object], Image.Image]]:
+    rows = [row for row, _ in images]
+    selected_rows = select_preview_rows(rows)
+    if not selected_rows:
+        return []
+
+    selected_ids = {id(row) for row in selected_rows}
+    selected_by_set = {str(row["set"]) for row in selected_rows}
+    candidates = [
+        (row, image)
+        for row, image in images
+        if id(row) in selected_ids or str(row["set"]) in selected_by_set
+    ]
+    if not candidates:
+        candidates = images
+
+    def sort_key(item: tuple[dict[str, object], Image.Image]) -> tuple[int, int, int, str]:
+        row, image = item
+        return (
+            preview_image_score(image),
+            image.width * image.height,
+            -int(row.get("frame") or 0),
+            str(row["png"]),
+        )
+
+    return sorted(candidates, key=sort_key, reverse=True)[:8]
+
+
+def preview_image_score(image: Image.Image) -> int:
+    alpha = image.getchannel("A")
+    bbox = alpha.getbbox()
+    if bbox is None:
+        return 0
+    left, top, right, bottom = bbox
+    bbox_area = (right - left) * (bottom - top)
+    visible_count = 0
+    for value in alpha.getdata():
+        if value:
+            visible_count += 1
+    return bbox_area + visible_count
 
 
 def build_contact_sheet(images: list[tuple[dict[str, object], Image.Image]]) -> Image.Image:
