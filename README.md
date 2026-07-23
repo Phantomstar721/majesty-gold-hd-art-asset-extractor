@@ -126,3 +126,17 @@ human-readable `buildings/sprites/` folders.
 These guide images are still generated from extracted assets, not screenshots.
 They do not fully reproduce Majesty's renderer, especially for placed buildings
 whose shadows/blend pixels are treated specially in game.
+
+## TILE format / AI re-art
+
+TILE v3 RLE stores each opaque run's **exclusive end** column (not start). See:
+
+- [docs/TILE_V3_RLE_ROOT_CAUSE.md](docs/TILE_V3_RLE_ROOT_CAUSE.md)
+- [docs/AI_SPRITE_REART_WORKFLOW.md](docs/AI_SPRITE_REART_WORKFLOW.md)
+
+Helpers:
+
+```powershell
+python scripts/export_sprite_sheet.py --record AVB1 --set Stand --out output/reart/AVB1_Stand
+python scripts/import_sprite_sheet.py --sheet-json output/reart/AVB1_Stand/AVB1Barbarian_Stand_sheet.json --out-tiles output/reart/AVB1_Stand/tiles
+```
