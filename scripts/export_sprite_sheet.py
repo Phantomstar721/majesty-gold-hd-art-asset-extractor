@@ -57,7 +57,11 @@ def main() -> int:
     parser.add_argument("--record", required=True, help="IMAG record prefix, e.g. AVB1")
     parser.add_argument("--set", default="Stand", help="Image set name or numeric setID (default Stand)")
     parser.add_argument("--out", type=Path, required=True, help="Output folder")
-    parser.add_argument("--keep-shadow", action="store_true", help="Keep palette indices 248-255")
+    parser.add_argument(
+        "--keep-shadow",
+        action="store_true",
+        help="Keep sprite shadow indices 247-250 and magenta key ramps",
+    )
     args = parser.parse_args()
 
     if args.cam is not None:

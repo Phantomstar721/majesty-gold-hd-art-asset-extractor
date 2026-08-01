@@ -105,7 +105,7 @@ def quantize_rgba_to_palette(
     for i, (r, g, b) in enumerate(palette):
         if is_transparent_color(r, g, b):
             transparent.add(i)
-        if not preserve_shadow_indices and i >= 248:
+        if not preserve_shadow_indices and 247 <= i <= 250:
             transparent.add(i)
 
     result: list[list[int]] = []
@@ -152,13 +152,13 @@ def render_tile_full(
         for x_start, pixels in segments:
             for dx, index in enumerate(pixels):
                 x = int(x_start) + dx
-                if x < 0 or x >= width or index == 0:
+                if x < 0 or x >= width:
                     continue
                 if palette is None:
                     image.putpixel((x, y), (index, index, index, 255))
                     continue
                 r, g, b = palette[index]
-                if drop_shadow and index >= 248:
+                if drop_shadow and 247 <= index <= 250:
                     continue
                 if drop_shadow and is_transparent_color(r, g, b):
                     continue

@@ -40,7 +40,7 @@ def main() -> int:
     parser.add_argument("--out-tiles", type=Path, required=True, help="Folder for encoded .tile binaries")
     parser.add_argument("--output-cam", type=Path, default=None, help="Optional patched CAM output path")
     parser.add_argument("--preserve-shadow-indices", action="store_true",
-                        help="Allow quantization into 248-255 when nearest")
+                        help="Allow quantization into sprite shadow indices 247-250 when nearest")
     args = parser.parse_args()
 
     meta = json.loads(args.sheet_json.read_text(encoding="utf-8"))

@@ -1,10 +1,11 @@
 [project]
 name = "majesty-gold-hd-art-asset-extractor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-only Majesty Gold HD art asset extractor and organizer."
 requires-python = ">=3.9"
 dependencies = [
     "Pillow>=10",
+    "imageio-ffmpeg>=0.6",
 ]
 
 [tool.setuptools]

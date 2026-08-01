@@ -36,7 +36,7 @@ Outputs:
 
 Frames are placed on a **shared cell** using IMAG hotspots so feet/pivots line up across directions.
 
-Optional: `--keep-shadow` to leave palette indices 248–255 visible (engine shadow/blend keys).
+Optional: `--keep-shadow` to leave sprite indices 247–250 and magenta key ramps visible (engine transition/shadow/blend controls).
 
 ## 2. AI / edit constraints
 

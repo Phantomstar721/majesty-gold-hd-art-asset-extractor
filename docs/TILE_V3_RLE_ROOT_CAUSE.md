@@ -11,7 +11,7 @@ That intuition was reasonable given the visuals, but wrong. The on-disk art is o
 Each TILE v3 RLE segment stores:
 
 ```text
-[u16 x_end] [u8 count] [u8 flags] [count palette indices]
+[u16 x_end] [u16 count_flags] [count palette indices or RGB565 pixels]
 ```
 
 `x_end` is the **exclusive end column** of the run. Pixels belong in `[x_end - count, x_end)`.
@@ -28,7 +28,7 @@ Header word at byte **4** is the canvas **width**. Correct exclusive-end decode 
 | Classic stride / pitch mismatch | Ruled out. TILE v3 has no dense row pitch; each row is sparse RLE. |
 | Interlacing / wrong bit depth | Ruled out. 8-bit palette indices decode with coherent colors. |
 | Missing IMAG hotspots as cause of *within-frame* shear | Ruled out. Hotspots affect sheet placement only. Geometry inside one TILE was already broken. |
-| Shadow indices 248–255 stripped | Contributes holes / missing soft edges, **not** the X shear. |
+| Sprite control indices stripped | Contributes holes / missing soft edges, **not** the X shear. |
 | Docs saying width@+2 / height@+4 / palette@+0x0C | Docs were wrong vs working code; following them alone would also garble sprites. |
 
 ## Decisive evidence (AVB1 Barbarian Stand, TILE 3794)
@@ -75,14 +75,37 @@ Start placement would put B at `[45, 66)` and C at `[57, 66)` — overlap and st
         then RLE row payloads
 ```
 
-Per row, repeat until `flags & 0x80`:
+Per row, repeat until `count_flags & 0x8000`:
 
 ```text
-[u16 x_end][u8 count][u8 flags][count × u8 indices]
+[u16 x_end][u16 count_flags][count × pixel_size bytes]
 ```
 
-- Index `0` = transparent (not stored; gaps are skips).
-- Indices `248–255` = shadow / blend keys (often magic pink in palettes). Extractors may drop them for clean previews; encoders should preserve them when present.
+- `count = count_flags & 0x07FF`; upper bits carry flags.
+- Indexed art uses one byte per pixel. The familiar short-run form can be
+  written as `[u8 count][u8 flags]`, but that is not the general format because
+  full-screen menu rows use counts above 255.
+- Palette-less widescreen/interface TILEs use two-byte RGB565 pixels.
+- Embedded-palette TILEs store the palette after the final row; that palette is
+  not part of the final row payload.
+
+- TILE v3 transparency comes from gaps between stored runs. Every value inside
+  a run is an authored pixel, including palette index `0` or RGB565 value `0`.
+  Treating explicit zeroes as transparent punches out white highlights and
+  surfaces in palettes where entry zero is near-white. The re-art encoder uses
+  index `0` as its transparent-output convention, but the original decoder
+  must not impose that convention on stored runs.
+- Some indexed UI and presentation art declares index `255` as transparent
+  while also using it for enclosed artwork colors. In full-palette categories,
+  the decoder keeps only boundary-connected components of that index
+  transparent and restores enclosed components. Sprite layers continue to
+  honor the declared transparent index everywhere.
+- The indexed 100x100 hero, monster, and building profile paintings are not
+  sprite layers. They retain indices `247–255`, including the header's nominal
+  transparent index; applying sprite cleanup to them punches visible holes
+  through faces and highlights. RGB565/RLE profile layers retain their authored
+  transparency.
+- In sprite/building palettes, Phantom's Haunt confirmed `247` as a transition/seam control and `248–250` as shadow bands. Magenta key ramps are also controls regardless of index. Indices `251–254` are not universally reserved—the Gazebo palette uses them for white highlights—so they are retained when they are ordinary colors. Full-screen interface, profiles, icons, effects, and sepia palettes use the high range as artwork, so cleaning is category-aware rather than deleting it globally.
 
 ## Why “round-trip verified” looked fine before
 

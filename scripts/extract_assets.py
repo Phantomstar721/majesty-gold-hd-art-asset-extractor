@@ -8,15 +8,42 @@ from pathlib import Path
 import re
 import shutil
 import struct
+import subprocess
+import tempfile
 import time
 import xml.etree.ElementTree as ET
+from enum import Enum
 
 from PIL import Image
+import imageio_ffmpeg
 
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Majesty HD")
 DEFAULT_OUT = TOOL_ROOT / "output" / "assets"
+
+
+class ExtractionMode(str, Enum):
+    """User-facing extraction presets."""
+
+    ALL_RAW = "all-raw"
+    RELEVANT_RAW = "relevant-raw"
+    RELEVANT_ART = "relevant-art"
+
+    @property
+    def exhaustive(self) -> bool:
+        return self is ExtractionMode.ALL_RAW
+
+    @property
+    def clean_art(self) -> bool:
+        return self is ExtractionMode.RELEVANT_ART
+
+
+MODE_LABELS = {
+    ExtractionMode.ALL_RAW: "All raw content",
+    ExtractionMode.RELEVANT_RAW: "Relevant sprites and menu art (raw)",
+    ExtractionMode.RELEVANT_ART: "Relevant art (clean PNGs)",
+}
 
 MAGIC = b"CYLBPC  \x01\x00\x01\x00"
 ANIM_HEADER_SIZE = 0x14
@@ -105,6 +132,49 @@ CURATED_INTERFACE_RECORDS = {
     "IX92": "icons/monsters",
     "IX94": "icons/monsters",
     "IX93": "icons/items",
+    # Main menus, option/score/name screens, and quest selection chrome.
+    "DEM2": "menus",
+    "INDa": "menus/options",
+    "INDh": "menus/high-scores",
+    "INDk": "menus/options",
+    "INDm": "menus/main",
+    "INDn": "menus/quest",
+    "INDp": "menus/options",
+    "INDq": "menus/options",
+    "INDz": "menus/main",
+    "INFs": "menus/freestyle",
+    "INkm": "menus/main",
+    "IX22": "menus/main",
+    "IX33": "menus/quest",
+    "IX34": "menus/quest",
+    "IX50": "menus/main",
+    "IX51": "menus/main",
+    "DX31": "menus/quest",
+    "IXD1": "menus/quest",
+    # Quest-map chrome and map backgrounds/stretch layers.
+    "INQc": "maps/interface",
+    "INQd": "maps/interface",
+    "INx2": "maps/interface",
+    "IX10": "maps/interface",
+    # Pre-quest, close-up, downloadable, and expansion segue art.
+    "DXS0": "segues",
+    "INDb": "segues",
+    "INDg": "segues",
+    "INPq": "segues",
+    "INse": "segues",
+    "INTM": "segues",
+    "INTP": "segues",
+    "IX72": "segues",
+    "IX73": "segues",
+    "IX78": "segues",
+    "IXR1": "segues",
+    "IXS1": "segues",
+    "MX29": "segues",
+    # Loading screens and their presentation layers.
+    "INDl": "loading_screens/interface",
+    "INDo": "loading_screens/interface",
+    # Miscellaneous full-screen interface backing used by the menus.
+    "INx1": "menus/interface",
 }
 
 MAIN_CAM_SOURCES = [
@@ -114,8 +184,23 @@ MAIN_CAM_SOURCES = [
 
 INTERFACE_CAM_SOURCES = [
     ("base_interface", Path("Data/interfacedata.cam")),
+    ("download_interface", Path("Data/addinterface.cam")),
+    ("widescreen_interface", Path("Data/addinterface_se.cam")),
     ("expansion_interface", Path("DataMX/mx_interfacedata.cam")),
+    ("downloadable_quest_interface", Path("DataMX/XQD1_intro.cam")),
 ]
+
+PICTURE_CAM_SOURCES = [
+    # cinedata1 contains the base intro and QM00-QM18 quest-map/segue movies.
+    ("base_presentation", Path("Data/cinedata1.cam")),
+    # cinedata3 is the higher-resolution variant of base movies/loading art.
+    ("base_presentation_hd", Path("Data/cinedata3.dat")),
+    # Expansion maps/segues, movie, and loading screen.
+    ("expansion_presentation", Path("DataMX/mx_cinedata1.cam")),
+    ("expansion_presentation_hd", Path("DataMX/mx_cinedata3.dat")),
+]
+
+PRESENTATION_SAMPLE_FRAMES = 12
 
 KNOWN_BUILDING_SET_IDS = {
     80,
@@ -460,8 +545,12 @@ def parse_directional_frame_descriptor(blob: bytes, rel_off: int) -> list[dict[s
     return directions
 
 
-def decode_tile_v3(tile_data: bytes) -> dict[str, object] | None:
-    """Decode TILE v3 RLE. On-disk x is exclusive end; returned segments use start."""
+def decode_tile_v3(tile_data: bytes, pixel_size: int | None = None) -> dict[str, object] | None:
+    """Decode indexed or RGB565 TILE v3 RLE.
+
+    The packed run word uses 11 low bits for count and upper bits for flags;
+    bit 15 ends the row. On-disk X is the exclusive end column.
+    """
     if len(tile_data) < 26 or u16(tile_data, 0) != 3:
         return None
     height = u16(tile_data, 2)
@@ -472,35 +561,65 @@ def decode_tile_v3(tile_data: bytes) -> dict[str, object] | None:
         return None
 
     offsets = [u32(tile_data, offset_base + row * 4) for row in range(height)]
-    rows = []
-    max_end = 0
-    for row in range(height):
-        start = offset_base + offsets[row]
-        end = offset_base + offsets[row + 1] if row + 1 < height else len(tile_data)
-        if start >= len(tile_data) or end > len(tile_data) or start > end:
-            rows.append([])
-            continue
-        row_data = tile_data[start:end]
-        segments = []
-        pos = 0
-        while pos + 4 <= len(row_data):
-            x_end = u16(row_data, pos)
-            count_word = u16(row_data, pos + 2)
-            pos += 4
-            count = count_word & 0x7FFF
-            if count > 0 and count <= x_end and pos + count <= len(row_data):
-                pixels = list(row_data[pos : pos + count])
-                pos += count
-                x_start = x_end - count
-                segments.append((x_start, pixels))
-                max_end = max(max_end, x_end)
-            if count_word & 0x8000:
-                break
-        rows.append(segments)
+    palette_mode = u16(tile_data, 20)
+    data_end = palette_id if palette_mode == 1 and offset_base < palette_id <= len(tile_data) else len(tile_data)
+
+    def parse_rows(bytes_per_pixel: int) -> tuple[list[list[tuple[int, list[int]]]], int] | None:
+        parsed_rows: list[list[tuple[int, list[int]]]] = []
+        max_end = 0
+        for row in range(height):
+            start = offset_base + offsets[row]
+            end = offset_base + offsets[row + 1] if row + 1 < height else data_end
+            if start < offset_base or start > end or end > data_end:
+                return None
+            row_data = tile_data[start:end]
+            segments: list[tuple[int, list[int]]] = []
+            pos = 0
+            ended = False
+            while pos + 4 <= len(row_data):
+                x_end = u16(row_data, pos)
+                count_flags = u16(row_data, pos + 2)
+                count = count_flags & 0x07FF
+                pos += 4
+                payload_size = count * bytes_per_pixel
+                if count > x_end or (header_width > 0 and x_end > header_width) or pos + payload_size > len(row_data):
+                    return None
+                payload = row_data[pos : pos + payload_size]
+                pos += payload_size
+                if bytes_per_pixel == 1:
+                    pixels = list(payload)
+                else:
+                    pixels = [u16(payload, index * 2) for index in range(count)]
+                if count:
+                    segments.append((x_end - count, pixels))
+                    max_end = max(max_end, x_end)
+                if count_flags & 0x8000:
+                    ended = True
+                    break
+            if not ended or pos != len(row_data):
+                return None
+            parsed_rows.append(segments)
+        return parsed_rows, max_end
+
+    candidates = [pixel_size] if pixel_size in {1, 2} else [1, 2]
+    parsed = None
+    chosen_pixel_size = 0
+    for candidate_size in candidates:
+        parsed = parse_rows(candidate_size)
+        if parsed is not None:
+            chosen_pixel_size = candidate_size
+            break
+    if parsed is None:
+        return None
+    rows, max_end = parsed
     width = header_width if header_width > 0 else max_end
-    if max_end > width:
-        width = max_end
-    return {"width": width, "height": height, "palette_id": palette_id, "rows": rows}
+    return {
+        "width": width,
+        "height": height,
+        "palette_id": palette_id,
+        "pixel_size": chosen_pixel_size,
+        "rows": rows,
+    }
 
 
 def load_palette(palette_section: CamSection, palette_id: int) -> list[tuple[int, int, int]] | None:
@@ -519,14 +638,72 @@ def load_embedded_palette(data: bytes, offset: int) -> list[tuple[int, int, int]
 
 
 def is_palette_key_color(index: int, red: int, green: int, blue: int) -> bool:
-    if index >= 248:
+    """Return True for engine control pixels that should not appear in clean art.
+
+    Phantom's Haunt confirmed that 247 is the transition/seam control and
+    248-250 are shadow bands. Indices 251-254 are not universally reserved:
+    some building palettes use them for ordinary highlights, while other
+    palettes put magenta control ramps there.
+    """
+    if 247 <= index <= 250:
         return True
     if red > 150 and green < 80 and blue > 150 and abs(red - blue) < 60:
         return True
     return green == 0 and red == blue and 120 <= red <= 140
 
 
-def tile_v1_to_image(tile_data: bytes, palette_section: CamSection | None) -> Image.Image | None:
+def edge_connected_index_offsets(
+    pixels: bytes,
+    width: int,
+    height: int,
+    row_stride: int,
+    index: int,
+) -> set[int]:
+    """Return pixels of one index connected to the image boundary.
+
+    Indexed interface art sometimes reuses its nominal transparent index for
+    real colors inside the image. Only the connected exterior region is true
+    transparency; enclosed components are palette-index collisions.
+    """
+    pending: list[tuple[int, int]] = []
+    for x in range(width):
+        if pixels[x] == index:
+            pending.append((x, 0))
+        bottom = (height - 1) * row_stride + x
+        if height > 1 and pixels[bottom] == index:
+            pending.append((x, height - 1))
+    for y in range(1, height - 1):
+        left = y * row_stride
+        if pixels[left] == index:
+            pending.append((0, y))
+        right = left + width - 1
+        if width > 1 and pixels[right] == index:
+            pending.append((width - 1, y))
+
+    connected: set[int] = set()
+    while pending:
+        x, y = pending.pop()
+        offset = y * row_stride + x
+        if offset in connected or pixels[offset] != index:
+            continue
+        connected.add(offset)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                nx, ny = x + dx, y + dy
+                if (dx or dy) and 0 <= nx < width and 0 <= ny < height:
+                    pending.append((nx, ny))
+    return connected
+
+
+def tile_v1_to_image(
+    tile_data: bytes,
+    palette_section: CamSection | None,
+    *,
+    clean_art: bool = True,
+    preserve_full_palette: bool = False,
+    force_opaque_palette: bool = False,
+    recover_enclosed_transparency: bool = False,
+) -> Image.Image | None:
     if len(tile_data) < 26 or u16(tile_data, 0) != 1:
         return None
 
@@ -541,8 +718,8 @@ def tile_v1_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
         return None
     if row_stride == width * 2 and 26 + height * row_stride <= len(tile_data):
         return tile_v1_rgb565_to_image(tile_data, width, height, row_stride)
-    pixel_count = width * height
-    if 26 + pixel_count > len(tile_data):
+    pixel_count = row_stride * height
+    if row_stride < width or 26 + pixel_count > len(tile_data):
         return None
 
     if palette_mode == 1:
@@ -555,14 +732,24 @@ def tile_v1_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
         return None
 
     pixels = tile_data[26 : 26 + pixel_count]
+    transparent_offsets: set[int] | None = None
+    if force_opaque_palette:
+        transparent_offsets = set()
+    elif preserve_full_palette and recover_enclosed_transparency:
+        transparent_offsets = edge_connected_index_offsets(
+            pixels, width, height, row_stride, transparent_index
+        )
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     for y in range(height):
         for x in range(width):
-            index = pixels[y * width + x]
-            if index == transparent_index:
+            pixel_offset = y * row_stride + x
+            index = pixels[pixel_offset]
+            if index == transparent_index and (
+                transparent_offsets is None or pixel_offset in transparent_offsets
+            ):
                 continue
             red, green, blue = palette[index]
-            if is_palette_key_color(index, red, green, blue):
+            if clean_art and is_palette_key_color(index, red, green, blue):
                 continue
             image.putpixel((x, y), (red, green, blue, 255))
     bbox = image.getbbox()
@@ -586,15 +773,27 @@ def tile_v1_rgb565_to_image(tile_data: bytes, width: int, height: int, row_strid
     return image.crop(bbox) if bbox else image
 
 
-def tile_v3_to_image(tile_data: bytes, palette_section: CamSection | None) -> Image.Image | None:
-    decoded = decode_tile_v3(tile_data)
+def tile_v3_to_image(
+    tile_data: bytes,
+    palette_section: CamSection | None,
+    *,
+    clean_art: bool = True,
+) -> Image.Image | None:
+    palette_mode = u16(tile_data, 20) if len(tile_data) >= 26 else 0
+    palette_value = u32(tile_data, 22) if len(tile_data) >= 26 else 0
+    if palette_mode == 1:
+        palette = load_embedded_palette(tile_data, palette_value)
+    elif palette_section is not None:
+        palette = load_palette(palette_section, palette_value)
+    else:
+        palette = None
+    decoded = decode_tile_v3(tile_data, pixel_size=1 if palette is not None else None)
     if decoded is None:
         return None
     width = int(decoded["width"])
     height = int(decoded["height"])
     if width <= 0 or height <= 0:
         return None
-    palette = load_palette(palette_section, int(decoded["palette_id"])) if palette_section else None
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     for y, segments in enumerate(decoded["rows"]):
         for x_start, pixels in segments:
@@ -602,11 +801,14 @@ def tile_v3_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
                 x = x_start + dx
                 if x < 0 or x >= width:
                     continue
-                if index == 0:
-                    continue
-                if palette:
+                if int(decoded["pixel_size"]) == 2:
+                    red = ((index >> 11) & 0x1F) * 255 // 31
+                    green = ((index >> 5) & 0x3F) * 255 // 63
+                    blue = (index & 0x1F) * 255 // 31
+                    image.putpixel((x, y), (red, green, blue, 255))
+                elif palette:
                     red, green, blue = palette[index]
-                    if is_palette_key_color(index, red, green, blue):
+                    if clean_art and is_palette_key_color(index, red, green, blue):
                         continue
                     image.putpixel((x, y), (red, green, blue, 255))
                 else:
@@ -615,13 +817,47 @@ def tile_v3_to_image(tile_data: bytes, palette_section: CamSection | None) -> Im
     return image.crop(bbox) if bbox else image
 
 
-def tile_to_image(tile_data: bytes, palette_section: CamSection | None) -> Image.Image | None:
+def tile_to_image(
+    tile_data: bytes,
+    palette_section: CamSection | None,
+    *,
+    clean_art: bool = True,
+    preserve_full_palette: bool = False,
+    force_opaque_palette: bool = False,
+    recover_enclosed_transparency: bool = False,
+) -> Image.Image | None:
     version = u16(tile_data, 0) if len(tile_data) >= 2 else 0
     if version == 1:
-        return tile_v1_to_image(tile_data, palette_section)
+        return tile_v1_to_image(
+            tile_data,
+            palette_section,
+            clean_art=clean_art,
+            preserve_full_palette=preserve_full_palette,
+            force_opaque_palette=force_opaque_palette,
+            recover_enclosed_transparency=recover_enclosed_transparency,
+        )
     if version == 3:
-        return tile_v3_to_image(tile_data, palette_section)
+        return tile_v3_to_image(tile_data, palette_section, clean_art=clean_art)
     return None
+
+
+def tile_to_category_image(
+    tile_data: bytes,
+    palette_section: CamSection | None,
+    category: str,
+    *,
+    clean_art: bool = True,
+) -> Image.Image | None:
+    """Decode a TILE using cleanup semantics appropriate to its output role."""
+    preserve_full_palette = should_preserve_full_palette(category)
+    return tile_to_image(
+        tile_data,
+        palette_section,
+        clean_art=clean_art and not preserve_full_palette,
+        preserve_full_palette=preserve_full_palette,
+        force_opaque_palette=category.startswith("profile_art/"),
+        recover_enclosed_transparency=should_recover_enclosed_transparency(category),
+    )
 
 
 def safe_name(value: str) -> str:
@@ -716,6 +952,7 @@ def export_imag_record(
     output_root: Path,
     manifest: list[dict[str, object]],
     full: bool,
+    clean_art: bool,
 ) -> int:
     image_sets = parse_anim_set(record.data)
     if not image_sets:
@@ -728,7 +965,10 @@ def export_imag_record(
         interface_category = classify_main_interface_set(category, set_id)
         if interface_category:
             next_off = image_sets[set_index + 1][2] if set_index + 1 < len(image_sets) else len(record.data)
-            images = interface_images_for_set(record.data, rel_off, next_off, interface_category, tile_section, splt_section)
+            images = interface_images_for_set(
+                record.data, rel_off, next_off, interface_category,
+                tile_section, splt_section, clean_art=clean_art,
+            )
             written += write_images(
                 source_label,
                 record,
@@ -755,7 +995,12 @@ def export_imag_record(
                     continue
                 if tile_index < 0 or tile_index >= len(tile_section.entries):
                     continue
-                image = tile_to_image(tile_section.entries[tile_index].data, splt_section)
+                image = tile_to_category_image(
+                    tile_section.entries[tile_index].data,
+                    splt_section,
+                    export_category,
+                    clean_art=clean_art,
+                )
                 if image is None:
                     continue
                 record_dir.mkdir(parents=True, exist_ok=True)
@@ -781,9 +1026,15 @@ def export_imag_record(
         if directional_written == 0:
             next_off = image_sets[set_index + 1][2] if set_index + 1 < len(image_sets) else len(record.data)
             if category.startswith("buildings/") and export_category == category:
-                images = building_state_images_for_set(record.data, rel_off, next_off, tile_section, splt_section)
+                images = building_state_images_for_set(
+                    record.data, rel_off, next_off, tile_section, splt_section,
+                    clean_art=clean_art,
+                )
             else:
-                images = interface_images_for_set(record.data, rel_off, next_off, export_category, tile_section, splt_section)
+                images = interface_images_for_set(
+                    record.data, rel_off, next_off, export_category,
+                    tile_section, splt_section, clean_art=clean_art,
+                )
             if not full:
                 images = images[:4]
             written += write_images(
@@ -870,6 +1121,7 @@ def export_interface_record(
     palette_section: CamSection | None,
     output_root: Path,
     manifest: list[dict[str, object]],
+    clean_art: bool,
 ) -> int:
     image_sets = parse_anim_set(record.data)
     if not image_sets:
@@ -878,10 +1130,18 @@ def export_interface_record(
     folder_name = safe_name(record.display_name)
     record_dir = output_root / category / folder_name
     written = 0
+    # Full-screen presentation palettes use the high index range as ordinary
+    # sepia/menu colors. Treating 247+ as sprite shadow controls punches holes
+    # through paintings, maps, and menu backgrounds.
+    preserve_full_palette = should_preserve_full_palette(category)
+    effective_clean_art = clean_art and not preserve_full_palette
 
     for set_index, (set_id, set_name, rel_off) in enumerate(image_sets):
         next_off = image_sets[set_index + 1][2] if set_index + 1 < len(image_sets) else len(record.data)
-        images = interface_images_for_set(record.data, rel_off, next_off, category, tile_section, palette_section)
+        images = interface_images_for_set(
+            record.data, rel_off, next_off, category, tile_section,
+            palette_section, clean_art=effective_clean_art,
+        )
         for variant_index, (tile_index, image) in enumerate(images):
             record_dir.mkdir(parents=True, exist_ok=True)
             file_name = f"{safe_name(set_name)}_variant{variant_index:02d}_tile{tile_index:05d}.png"
@@ -912,6 +1172,8 @@ def interface_images_for_set(
     category: str,
     tile_section: CamSection,
     palette_section: CamSection | None,
+    *,
+    clean_art: bool = True,
 ) -> list[tuple[int, Image.Image]]:
     if rel_off < 0 or next_off <= rel_off or next_off > len(blob):
         return []
@@ -929,7 +1191,12 @@ def interface_images_for_set(
         tile_index = u32(blob, offset)
         if tile_index == 0 or tile_index in seen or tile_index >= len(tile_section.entries):
             continue
-        image = tile_to_image(tile_section.entries[tile_index].data, palette_section)
+        image = tile_to_category_image(
+            tile_section.entries[tile_index].data,
+            palette_section,
+            category,
+            clean_art=clean_art,
+        )
         if image is None or not looks_like_interface_asset(category, image):
             continue
         seen.add(tile_index)
@@ -943,6 +1210,8 @@ def building_state_images_for_set(
     next_off: int,
     tile_section: CamSection,
     palette_section: CamSection | None,
+    *,
+    clean_art: bool = True,
 ) -> list[tuple[int, Image.Image]]:
     if rel_off < 0 or next_off <= rel_off or next_off > len(blob):
         return []
@@ -958,7 +1227,11 @@ def building_state_images_for_set(
         tile_index = u32(blob, cursor)
         prefix = u32(blob, cursor - 4) if cursor - 4 >= rel_off else 0
         if 0 < tile_index < len(tile_section.entries) and prefix == 0 and tile_index not in seen:
-            image = tile_to_image(tile_section.entries[tile_index].data, palette_section)
+            image = tile_to_image(
+                tile_section.entries[tile_index].data,
+                palette_section,
+                clean_art=clean_art,
+            )
             if image is not None and image.width >= 16 and image.height >= 16:
                 found.append((tile_index, image))
                 seen.add(tile_index)
@@ -979,7 +1252,404 @@ def looks_like_interface_asset(category: str, image: Image.Image) -> bool:
     return True
 
 
-def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None) -> int:
+def presentation_category(record_name: str) -> str | None:
+    upper = record_name.upper()
+    if upper.startswith("QM"):
+        return "maps/quest"
+    if upper.startswith("MV"):
+        return "cinematics"
+    if upper.startswith("SPLH"):
+        return "loading_screens"
+    return None
+
+
+def decode_splash_picture(data: bytes) -> Image.Image | None:
+    """Decode the 15-bit BGR loading picture stored in PICT/SPLH records."""
+    if len(data) < 48 or u32(data, 0) != 1:
+        return None
+    width = u16(data, 16)
+    height = u16(data, 18)
+    pixel_size = width * height * 2
+    if width <= 0 or height <= 0 or 48 + pixel_size > len(data):
+        return None
+    image = Image.frombytes("RGB", (width, height), data[48 : 48 + pixel_size], "raw", "BGR;15")
+    return image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+
+
+def bink_sample_frame_indices(data: bytes, sample_count: int = PRESENTATION_SAMPLE_FRAMES) -> list[int]:
+    if len(data) < 40 or data[4:7] != b"BIK":
+        return []
+    frame_count = u32(data, 12)
+    if frame_count <= 0:
+        return []
+    count = min(sample_count, frame_count)
+    if count == 1:
+        return [0]
+    return sorted({round(index * (frame_count - 1) / (count - 1)) for index in range(count)})
+
+
+def decode_bink_samples(data: bytes) -> list[tuple[int, Image.Image]]:
+    """Decode evenly spaced Bink frames through imageio's bundled FFmpeg."""
+    frame_indices = bink_sample_frame_indices(data)
+    if not frame_indices:
+        return []
+
+    with tempfile.TemporaryDirectory(prefix="majesty-art-") as temp_value:
+        temp = Path(temp_value)
+        source_path = temp / "source.bik"
+        source_path.write_bytes(data[4:])  # PICT prepends a four-byte type value.
+        expression = "+".join(f"eq(n\\,{frame})" for frame in frame_indices)
+        output_pattern = temp / "frame-%03d.png"
+        command = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(source_path),
+            "-an",
+            "-vf",
+            f"select={expression}",
+            "-fps_mode",
+            "vfr",
+            str(output_pattern),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"Could not decode Bink presentation art: {result.stderr.strip()}")
+
+        decoded: list[tuple[int, Image.Image]] = []
+        for sequence, frame_index in enumerate(frame_indices, start=1):
+            frame_path = temp / f"frame-{sequence:03d}.png"
+            if not frame_path.exists():
+                continue
+            with Image.open(frame_path) as image:
+                decoded.append((frame_index, image.convert("RGB")))
+        return decoded
+
+
+def cinematic_soundtrack_path(game: Path, record_name: str) -> Path | None:
+    """Return the runtime music used by a video-only cinematic, if known.
+
+    MV01 and MV06 are the original and expansion credit reels. Their Bink
+    records intentionally contain no audio; in game they are reached from the
+    menu while the general theme supplies the soundtrack.
+    """
+    if record_name.upper() not in {"MV01", "MV06"}:
+        return None
+    soundtrack = game / "Music" / "GeneralTheme.mp3"
+    return soundtrack if soundtrack.is_file() else None
+
+
+def transcode_bink_video(data: bytes, output_path: Path, soundtrack_path: Path | None = None) -> None:
+    """Write an embedded Bink stream as a broadly playable, audible MP4."""
+    if not bink_sample_frame_indices(data, sample_count=1):
+        raise ValueError("PICT record does not contain a supported Bink stream")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="majesty-video-") as temp_value:
+        source_path = Path(temp_value) / "source.bik"
+        source_path.write_bytes(data[4:])
+        command = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(source_path),
+        ]
+        if soundtrack_path is not None:
+            command.extend(["-i", str(soundtrack_path)])
+        command.extend([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0" if soundtrack_path is not None else "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-movflags",
+            "+faststart",
+        ])
+        if soundtrack_path is not None:
+            # The menu theme is longer than either credit reel. Stop the mux
+            # when the video ends, matching the lifetime of the in-game view.
+            command.append("-shortest")
+        command.append(str(output_path))
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"Could not convert Bink cinematic: {result.stderr.strip()}")
+
+
+def make_presentation_contact_sheet(frames: list[tuple[int, Image.Image]]) -> Image.Image:
+    from PIL import ImageDraw
+
+    thumb_width = 240
+    label_height = 24
+    columns = min(4, len(frames))
+    rows = (len(frames) + columns - 1) // columns
+    thumbs: list[tuple[int, Image.Image]] = []
+    cell_height = 0
+    for frame_index, source in frames:
+        image = source.copy()
+        image.thumbnail((thumb_width, 180), Image.Resampling.LANCZOS)
+        cell_height = max(cell_height, image.height + label_height)
+        thumbs.append((frame_index, image))
+
+    sheet = Image.new("RGB", (columns * thumb_width, rows * cell_height), (24, 24, 24))
+    draw = ImageDraw.Draw(sheet)
+    for index, (frame_index, image) in enumerate(thumbs):
+        column = index % columns
+        row = index // columns
+        x = column * thumb_width + (thumb_width - image.width) // 2
+        y = row * cell_height
+        sheet.paste(image, (x, y))
+        draw.text((column * thumb_width + 6, y + image.height + 4), f"Frame {frame_index}", fill=(235, 235, 235))
+    return sheet
+
+
+def export_presentation_art(
+    game: Path,
+    output_root: Path,
+    manifest: list[dict[str, object]],
+    *,
+    keep_original_video: bool = False,
+) -> int:
+    written = 0
+    print("Extracting maps, cinematics, segues, and loading screens...", flush=True)
+    for source_label, rel_path in PICTURE_CAM_SOURCES:
+        path = game / rel_path
+        if not path.exists():
+            continue
+        archive = read_cam(path)
+        picture_section = next((section for section in archive.sections if section.extension == "PICT"), None)
+        if picture_section is None:
+            continue
+        for record in picture_section.entries:
+            category = presentation_category(record.display_name)
+            if category is None:
+                continue
+            record_dir = output_root / category / safe_name(f"{source_label}_{record.display_name}")
+            record_dir.mkdir(parents=True, exist_ok=True)
+
+            if category == "loading_screens":
+                image = decode_splash_picture(record.data)
+                frames = [(0, image)] if image is not None else []
+            else:
+                frames = decode_bink_samples(record.data)
+
+            if category == "cinematics":
+                transcode_bink_video(
+                    record.data,
+                    record_dir / f"{safe_name(record.display_name)}.mp4",
+                    cinematic_soundtrack_path(game, record.display_name),
+                )
+                if keep_original_video:
+                    (record_dir / f"{safe_name(record.display_name)}.bik").write_bytes(record.data[4:])
+
+            for sample_index, (frame_index, image) in enumerate(frames):
+                name = f"sample{sample_index:02d}_frame{frame_index:05d}.png"
+                output_path = record_dir / name
+                image.save(output_path)
+                manifest.append(
+                    {
+                        "category": category,
+                        "source": source_label,
+                        "image_id": record.display_name,
+                        "record": record.display_name,
+                        "display_name": record.display_name,
+                        "set": "Presentation",
+                        "direction": "",
+                        "frame": frame_index,
+                        "tile_index": "",
+                        "png": output_path.relative_to(output_root).as_posix(),
+                    }
+                )
+                written += 1
+
+            if len(frames) > 1:
+                contact_dir = output_root / "_previews" / category
+                contact_dir.mkdir(parents=True, exist_ok=True)
+                make_presentation_contact_sheet(frames).save(
+                    contact_dir / f"{safe_name(source_label)}_{safe_name(record.display_name)}.png"
+                )
+    return written
+
+
+def should_preserve_full_palette(category: str) -> bool:
+    """Non-sprite art uses high indices as colors, not sprite controls."""
+    return category.startswith(
+        ("profile_art", "icons", "spell_effects", "menus", "maps", "segues", "loading_screens")
+    )
+
+
+def should_recover_enclosed_transparency(category: str) -> bool:
+    """UI/presentation art may reuse its transparent index inside the artwork."""
+    return category.startswith(("icons", "menus", "maps", "segues", "loading_screens"))
+
+
+def expected_tile_opaque_pixels(
+    tile_data: bytes,
+    palette_section: CamSection | None,
+    category: str,
+    *,
+    clean_art: bool,
+) -> int | None:
+    """Count source pixels that a decoded TILE PNG must keep opaque.
+
+    This intentionally derives occupancy from the source encoding rather than
+    calling the image renderer. It catches shared clean/raw decoder losses such
+    as treating an explicitly stored TILE v3 palette index zero as a gap.
+    """
+    version = u16(tile_data, 0) if len(tile_data) >= 2 else 0
+    preserve_full_palette = should_preserve_full_palette(category)
+
+    if version == 3:
+        palette_mode = u16(tile_data, 20) if len(tile_data) >= 26 else 0
+        palette_value = u32(tile_data, 22) if len(tile_data) >= 26 else 0
+        if palette_mode == 1:
+            palette = load_embedded_palette(tile_data, palette_value)
+        elif palette_section is not None:
+            palette = load_palette(palette_section, palette_value)
+        else:
+            palette = None
+        decoded = decode_tile_v3(tile_data, pixel_size=1 if palette is not None else 2)
+        if decoded is None:
+            return None
+        values = [value for row in decoded["rows"] for _x, pixels in row for value in pixels]
+        if not clean_art or preserve_full_palette or palette is None:
+            return len(values)
+        return sum(not is_palette_key_color(value, *palette[value]) for value in values)
+
+    if version != 1 or len(tile_data) < 26:
+        return None
+    height = u16(tile_data, 2)
+    width = u16(tile_data, 4)
+    row_stride = u16(tile_data, 6)
+    if width <= 0 or height <= 0:
+        return None
+    if row_stride == width * 2 and 26 + height * row_stride <= len(tile_data):
+        return sum(u16(tile_data, 26 + y * row_stride + x * 2) != 0 for y in range(height) for x in range(width))
+    if row_stride < width or 26 + height * row_stride > len(tile_data):
+        return None
+
+    palette_mode = u16(tile_data, 20)
+    palette_value = u32(tile_data, 22)
+    if palette_mode == 1:
+        palette = load_embedded_palette(tile_data, palette_value)
+    elif palette_section is not None:
+        palette = load_palette(palette_section, palette_value)
+    else:
+        palette = None
+    if palette is None:
+        return None
+
+    pixels = tile_data[26 : 26 + height * row_stride]
+    transparent_index = u16(tile_data, 16) & 0xFF
+    if category.startswith("profile_art/"):
+        transparent_offsets: set[int] = set()
+    elif should_recover_enclosed_transparency(category):
+        transparent_offsets = edge_connected_index_offsets(
+            pixels, width, height, row_stride, transparent_index
+        )
+    else:
+        transparent_offsets = {
+            y * row_stride + x
+            for y in range(height)
+            for x in range(width)
+            if pixels[y * row_stride + x] == transparent_index
+        }
+
+    opaque = 0
+    for y in range(height):
+        for x in range(width):
+            offset = y * row_stride + x
+            index = pixels[offset]
+            if index == transparent_index and offset in transparent_offsets:
+                continue
+            if clean_art and not preserve_full_palette and is_palette_key_color(index, *palette[index]):
+                continue
+            opaque += 1
+    return opaque
+
+
+def audit_extracted_tile_occupancy(
+    game: Path,
+    output_root: Path,
+    manifest: list[dict[str, object]],
+    *,
+    clean_art: bool,
+) -> int:
+    """Verify every TILE-derived PNG against independently counted source pixels."""
+    sources: dict[str, tuple[CamSection | None, CamSection | None]] = {}
+    for source_label, rel_path in MAIN_CAM_SOURCES:
+        _imag, tile, palette = get_sections(read_cam(game / rel_path))
+        sources[source_label] = (tile, palette)
+
+    palette_fallback: CamSection | None = None
+    for source_label, rel_path in INTERFACE_CAM_SOURCES:
+        path = game / rel_path
+        if not path.exists():
+            continue
+        _imag, tile, palette = get_sections(read_cam(path))
+        if palette is not None:
+            palette_fallback = palette
+        sources[source_label] = (tile, palette or palette_fallback)
+
+    checked = 0
+    failures: list[str] = []
+    for row in manifest:
+        tile_value = row.get("tile_index", "")
+        source_value = str(row.get("source", ""))
+        if tile_value in {"", None} or source_value not in sources:
+            continue
+        tile_section, palette_section = sources[source_value]
+        tile_index = int(tile_value)
+        if tile_section is None or not 0 <= tile_index < len(tile_section.entries):
+            failures.append(f"{row.get('png')}: invalid source TILE {tile_index}")
+            continue
+        expected = expected_tile_opaque_pixels(
+            tile_section.entries[tile_index].data,
+            palette_section,
+            str(row.get("category", "")),
+            clean_art=clean_art,
+        )
+        if expected is None:
+            failures.append(f"{row.get('png')}: could not independently count source TILE {tile_index}")
+            continue
+        output_path = output_root / str(row["png"])
+        if not output_path.exists():
+            failures.append(f"{row.get('png')}: output PNG is missing")
+            continue
+        with Image.open(output_path) as image:
+            actual = sum(alpha > 0 for alpha in image.convert("RGBA").getchannel("A").getdata())
+        checked += 1
+        if actual != expected:
+            failures.append(f"{row.get('png')}: expected {expected} opaque pixels, found {actual}")
+
+    if failures:
+        details = "\n  - ".join(failures[:20])
+        extra = f"\n  ... and {len(failures) - 20} more" if len(failures) > 20 else ""
+        raise RuntimeError(f"Source-pixel audit failed:\n  - {details}{extra}")
+    return checked
+
+
+def extract_assets(
+    game: Path,
+    output_root: Path,
+    full: bool = False,
+    limit: int | None = None,
+    *,
+    clean_art: bool = True,
+) -> int:
     started = time.perf_counter()
     catalog = parse_catalog(game)
     validate_output_root(game, output_root)
@@ -1013,6 +1683,7 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
                 output_root,
                 manifest,
                 full,
+                clean_art,
             )
             if count:
                 total += count
@@ -1039,7 +1710,10 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
                 continue
             if category is None:
                 category = "other/interface"
-            count = export_interface_record(source_label, record, category, tile, effective_palette, output_root, manifest)
+            count = export_interface_record(
+                source_label, record, category, tile, effective_palette,
+                output_root, manifest, clean_art,
+            )
             if count:
                 total += count
                 records_done += 1
@@ -1049,6 +1723,21 @@ def extract_assets(game: Path, output_root: Path, full: bool, limit: int | None)
                     create_previews(output_root, manifest)
                     return total
 
+    total += export_presentation_art(
+        game,
+        output_root,
+        manifest,
+        keep_original_video=not clean_art,
+    )
+
+    print("Auditing decoded TILE pixels against source runs...", flush=True)
+    audited = audit_extracted_tile_occupancy(
+        game,
+        output_root,
+        manifest,
+        clean_art=clean_art,
+    )
+    print(f"Source-pixel audit passed for {audited} TILE-derived PNGs.", flush=True)
     print(f"Writing manifest for {total} files...", flush=True)
     write_manifest(output_root, manifest)
     print("Creating preview sheets...", flush=True)
@@ -1313,11 +2002,74 @@ def make_zip(output_root: Path) -> Path:
     return Path(archive_path)
 
 
+def extract_mode(
+    game: Path,
+    output_root: Path,
+    mode: ExtractionMode | str,
+    *,
+    limit: int | None = None,
+) -> int:
+    """Extract using one of the three user-facing presets."""
+    selected = ExtractionMode(mode)
+    print(f"Mode: {MODE_LABELS[selected]}", flush=True)
+    return extract_assets(
+        game,
+        output_root,
+        full=selected.exhaustive,
+        limit=limit,
+        clean_art=selected.clean_art,
+    )
+
+
+def estimate_output_size(game: Path, mode: ExtractionMode | str) -> int:
+    """Return a conservative output-size estimate without decoding every TILE.
+
+    The CAMs use compact indexed/RLE art while output PNGs include per-record
+    organization, previews, and sometimes repeated referenced frames. These
+    ratios intentionally err high and are quick enough to refresh in the GUI.
+    """
+    selected = ExtractionMode(mode)
+    art_source_bytes = sum(
+        (game / rel_path).stat().st_size
+        for _label, rel_path in MAIN_CAM_SOURCES + INTERFACE_CAM_SOURCES
+        if (game / rel_path).exists()
+    )
+    presentation_source_bytes = sum(
+        (game / rel_path).stat().st_size
+        for _label, rel_path in PICTURE_CAM_SOURCES
+        if (game / rel_path).exists()
+    )
+    if selected is ExtractionMode.ALL_RAW:
+        return int(art_source_bytes * 2.75 + presentation_source_bytes * 1.25)
+    if selected is ExtractionMode.RELEVANT_RAW:
+        return int(art_source_bytes * 0.55 + presentation_source_bytes * 1.25)
+    return int(art_source_bytes * 0.45 + presentation_source_bytes * 0.80)
+
+
+def format_bytes(size: int) -> str:
+    value = float(max(0, size))
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.0f} {unit}" if unit == "bytes" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Extract local Majesty Gold HD art assets to PNG.")
     parser.add_argument("--game", type=Path, help="Majesty Gold HD install folder; auto-discovered if omitted")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output folder")
-    parser.add_argument("--full", action="store_true", help="Exhaustive extraction: all frames plus uncategorized main/interface records")
+    parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in ExtractionMode],
+        default=ExtractionMode.RELEVANT_ART.value,
+        help="Extraction preset (default: relevant-art)",
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Deprecated alias for --mode all-raw",
+    )
     parser.add_argument("--limit", type=int, help="Stop after this many IMAG records with extracted PNGs")
     parser.add_argument("--zip", action="store_true", help="Create a local zip next to the output folder")
     args = parser.parse_args()
@@ -1325,7 +2077,8 @@ def main() -> int:
     game = resolve_game_path(args.game)
     output = args.out if args.out.is_absolute() else TOOL_ROOT / args.out
 
-    total = extract_assets(game, output, args.full, args.limit)
+    mode = ExtractionMode.ALL_RAW if args.full else ExtractionMode(args.mode)
+    total = extract_mode(game, output, mode, limit=args.limit)
     print(f"Game folder: {game}")
     print(f"Extracted {total} PNG files to {output}")
     if args.zip:

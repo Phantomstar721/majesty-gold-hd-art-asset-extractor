@@ -17,10 +17,14 @@ The extractor focuses on art that is useful for modding and reference:
 - Building profile art, small building icons, and building/lair sprites
 - Weapon, armor, item, and spell icons
 - Spell, projectile, and overlay effect sprites
+- Main menus, options, quest selection, and other full-screen interface art
+- Quest maps and animated quest-segue illustrations
+- Cinematic sample frames and contact sheets
+- Base and expansion loading screens
 
 Known assets are sorted into specific folders. Unknown main/interface records
 and most extra animation frames are skipped by default because they produce a
-large amount of noisy output; use `--full` if you want exhaustive dumps under
+large amount of noisy output; use `--mode all-raw` if you want exhaustive dumps under
 `other/main/` and `other/interface/`.
 
 ## Setup
@@ -31,12 +35,35 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-On Windows, `run_extractor.cmd` will create/use `.venv`, install requirements,
-and run the extractor:
+On Windows, double-click `run_extractor.cmd`. It creates/uses a small local
+virtual environment and opens the extractor window:
 
 ```powershell
 .\run_extractor.cmd
 ```
+
+The window auto-detects Majesty Gold HD, lets you choose an output folder and
+one of three extraction modes, shows a conservative space estimate and free
+disk space, and keeps a live progress log. The default output is
+`output\assets` beside the tool.
+
+### Extraction modes
+
+1. **All raw content** exports every recognized frame, support layer, and
+   uncategorized art record. Palette-control pixels are left visible. This is
+   the slowest and largest option.
+2. **Relevant sprites and menu art (raw)** keeps useful sprites, menus, maps,
+   cinematics, segues, and loading screens but leaves Majesty's raw
+   shadow/blend/transition palette colors visible.
+3. **Relevant art (clean PNGs)** is the default. It keeps useful sprites,
+   effects, profiles, icons, menus, maps, cinematics, segues, and loading
+   screens while making engine-only controls transparent in sprite palettes.
+   Profiles, icons, effects, and presentation/UI palettes are preserved because
+   their high indices are real colors rather than sprite shadow controls.
+
+Here, “raw” means a directly decoded PNG, not a proprietary `.TILE` file. PNGs
+remain easy to inspect while faithfully showing the pixels stored for the game
+engine.
 
 ## Extract
 
@@ -60,20 +87,42 @@ Useful options:
 ```powershell
 .\.venv\Scripts\python scripts\extract_assets.py --game "D:\SteamLibrary\steamapps\common\Majesty HD"
 .\.venv\Scripts\python scripts\extract_assets.py --out output\assets --zip
+.\.venv\Scripts\python scripts\extract_assets.py --mode relevant-raw
+.\.venv\Scripts\python scripts\extract_assets.py --mode all-raw
 .\.venv\Scripts\python scripts\extract_assets.py --limit 5
-.\.venv\Scripts\python scripts\extract_assets.py --full
 .\run_extractor.cmd --zip
 ```
 
-The default run is intentionally fast and curated. It exports profile art,
-icons, representative hero/monster/building/lair sprites, representative spell
-effects, `_previews/`, and `_manifest.csv`. Use `--full` only when you want the
-large exhaustive dump of all animation frames, support layers, and uncategorized
+`--full` remains as a backwards-compatible alias for `--mode all-raw`.
+
+The default run is curated. It exports profile art, icons, representative
+hero/monster/building/lair sprites, spell effects, presentation art, `_previews/`,
+and `_manifest.csv`. Cinematics become playable H.264 MP4 videos as well as
+twelve evenly spaced full-resolution PNG samples and contact sheets. Raw modes
+also retain the original embedded `.bik` cinematics. Quest-map movies become
+twelve samples plus contact sheets; this captures their visual sequence without
+dumping every near-duplicate frame. Use `--mode all-raw` when you want the large
+exhaustive dump of sprite animation frames, support layers, and uncategorized
 records.
 
-Generated output goes under `output/` by default and is gitignored. The extractor
-clears the selected output folder each run, and refuses obvious unsafe targets
-such as the game folder or repo root.
+The MP4s include their in-game sound. MV02, MV04, and MV07 carry native Bink
+audio, which is preserved and converted to AAC. MV01 and MV06 are silent credit
+reels in the archives; Majesty plays the menu's `GeneralTheme.mp3` alongside
+them at runtime, so the extractor adds that theme to those two MP4s and trims
+it at the end of the video. Raw modes still preserve the untouched `.bik`
+files, including their original audio-stream layout.
+
+Generated output goes under `output/` by default and is gitignored. The GUI asks
+before replacing a non-empty output folder. The command-line extractor clears
+the selected output folder each run. Both refuse obvious unsafe targets such as
+the game folder or repo root.
+
+Every normal extraction now finishes with a source-pixel occupancy audit. For
+each TILE-derived PNG, it independently counts pixels encoded in the archive's
+v3 RLE runs or v1 raster and verifies the PNG alpha count after only the
+category's documented transparency/control rules. Extraction fails loudly if
+the renderer drops a stored value—including an explicit palette-index-zero
+pixel—or invents an opaque pixel.
 
 `--zip` creates a local zip next to the output folder. Keep that zip private
 unless you have permission to redistribute the extracted assets.
@@ -97,6 +146,12 @@ output/assets/
   profile_art/heroes/
   profile_art/monsters/
   profile_art/buildings/
+  menus/
+  maps/interface/
+  maps/quest/
+  cinematics/              # MP4 + samples; raw modes also include BIK
+  segues/
+  loading_screens/
   _previews/
   _manifest.csv
 ```
@@ -118,12 +173,27 @@ become variant PNGs such as `Active_variant00_tile00931.png`.
 Building records also contain many numeric image sets that appear to be support
 layers, masks, rubble pieces, animation internals, or other not-yet-named data.
 Those are skipped during normal extraction instead of being mixed into the
-human-readable `buildings/sprites/` folders. Use `--full` to keep those records
+human-readable `buildings/sprites/` folders. Use `--mode all-raw` to keep those records
 under `other/main/`.
 
 ## TILE format / AI re-art
 
-TILE v3 RLE stores each opaque run's **exclusive end** column (not start). See:
+TILE v3 RLE stores each opaque run's **exclusive end** column (not start). Its
+packed run word uses eleven low count bits and upper flag bits, allowing wide
+menu rows; palette-less variants store RGB565 pixels instead of indices. Gaps
+between runs are transparent, while every explicitly stored value—including
+palette index zero—is artwork. Clean
+sprite extraction treats index `247` as the transition/seam control and
+`248-250` as shadow bands, as confirmed by Phantom's Haunt. Magenta key ramps
+are also removed by color. Indices `251-254` remain visible when they hold
+ordinary colors, as they do in the Gazebo's white highlights. Full-screen
+Profiles, icons, effects, and sepia/menu palettes use the high range as ordinary
+colors and therefore retain it. Indexed UI and presentation art is also checked
+for a legacy transparent-index collision: only pixels connected to the image
+edge remain transparent, while enclosed artwork pixels are restored. Indexed,
+full-background profile portraits are decoded as opaque full-palette paintings
+rather than applying sprite shadow/control-index removal to their facial colors.
+See:
 
 - [docs/TILE_V3_RLE_ROOT_CAUSE.md](docs/TILE_V3_RLE_ROOT_CAUSE.md)
 - [docs/AI_SPRITE_REART_WORKFLOW.md](docs/AI_SPRITE_REART_WORKFLOW.md)

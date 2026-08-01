@@ -11,8 +11,15 @@ if not exist ".venv\Scripts\python.exe" (
   )
 )
 
-".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt
-if errorlevel 1 exit /b 1
+".venv\Scripts\python.exe" -c "import PIL, imageio_ffmpeg" >nul 2>nul
+if errorlevel 1 (
+  ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt
+  if errorlevel 1 exit /b 1
+)
 
-".venv\Scripts\python.exe" scripts\extract_assets.py %*
+if "%~1"=="" (
+  ".venv\Scripts\python.exe" scripts\extractor_gui.py
+) else (
+  ".venv\Scripts\python.exe" scripts\extract_assets.py %*
+)
 endlocal
