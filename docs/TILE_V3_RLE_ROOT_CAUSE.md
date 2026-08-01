@@ -92,9 +92,12 @@ Per row, repeat until `count_flags & 0x8000`:
 - TILE v3 transparency comes from gaps between stored runs. Every value inside
   a run is an authored pixel, including palette index `0` or RGB565 value `0`.
   Treating explicit zeroes as transparent punches out white highlights and
-  surfaces in palettes where entry zero is near-white. The re-art encoder uses
-  index `0` as its transparent-output convention, but the original decoder
-  must not impose that convention on stored runs.
+  surfaces in palettes where entry zero is near-white.
+- RGB565 has no transparent-index field, so `0x0000` is ambiguous: pure black in
+  a background, or the cutout in a sprite layer. The decoder resolves it by
+  output category. Backgrounds keep their black; sprite layers keep their
+  silhouette. Reading it as transparent everywhere removed 4.5% of the main
+  menu backdrop while leaving the pixels one step off black untouched.
 - Some indexed UI and presentation art declares index `255` as transparent
   while also using it for enclosed artwork colors. In full-palette categories,
   the decoder keeps only boundary-connected components of that index
@@ -119,29 +122,24 @@ More importantly: overlays / simple silhouettes with few multi-run rows could lo
 
 After the fix, decode converts end → start for callers; encode writes `x_end = start + count`. Pixel round-trip on AVB1 TILE 3794 succeeds.
 
-## Fix checklist
+## How the decoder was validated
 
-- [x] `Majesty-ModdingToolkit/sprite_extractor.py` — exclusive-end decode; width from header@4 / max end
-- [x] `Majesty-ModdingToolkit/sprite_injector.py` — write exclusive end
-- [x] `majesty-gold-hd-art-asset-extractor/scripts/extract_assets.py` — same decode
-- [x] `CAM_MODDING_GUIDE.md` TILE section corrected
-- [x] Validation: AVB1 / AVA1 / ABC1 coherent; roundtrip tile 3794
+- Exclusive-end decode, with width taken from header word 2 or the largest run
+  end when that word is zero.
+- Cross-checked on AVB1, AVA1 and ABC1: multi-run rows are coherent rather than
+  sheared.
+- Every decoded PNG is re-counted against the source runs by the extractor's
+  own occupancy audit, which fails the run on any mismatch.
 
-Commands:
+## If you want to write TILEs
 
-```powershell
-cd Majesty-ModdingToolkit
-python sprite_injector.py --cam "C:\Program Files (x86)\Steam\steamapps\common\Majesty HD\Data\maindata.cam" --roundtrip --tile-idx 3794
-```
+This project only reads. Writing a TILE back into a CAM is a separate problem
+and deliberately out of scope here, but the format notes above are what an
+encoder needs:
 
-## Implications for AI re-art
-
-Correct exclusive-end encode is mandatory if you want AI-edited sheets to render in-game without recreating the garbage. See [AI_SPRITE_REART_WORKFLOW.md](AI_SPRITE_REART_WORKFLOW.md).
-
-Pipeline:
-
-1. Export a normalized sprite sheet + JSON (shared canvas / hotspots).
-2. AI regenerates the sheet while keeping the grid and pivots.
-3. Quantize to the unit SPLT palette; preserve transparency / optional shadow band.
-4. Slice cells → exclusive-end TILE encode → replace TILE entries (keep IMAG indices).
-5. Extract again and smoke-test in game.
+- Store the **exclusive end** column, `x_end = start + count`, not the start.
+- Count occupies the low 11 bits of the packed run word; bit 15 ends the row.
+- Gaps between runs are the only transparency. Do not emit a run for them.
+- A value inside a run is authored artwork even when it is zero, so an encoder
+  that reserves index `0` for transparency cannot round-trip art that uses
+  index `0` as a real colour.

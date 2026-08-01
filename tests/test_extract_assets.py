@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import struct
 import sys
@@ -12,19 +13,26 @@ from extract_assets import (  # noqa: E402
     CamEntry,
     CamSection,
     ExtractionMode,
+    OUTPUT_MARKER,
     bink_sample_frame_indices,
     cinematic_soundtrack_path,
+    confirm_output_clear,
     decode_splash_picture,
     decode_tile_v3,
+    is_inside,
     is_palette_key_color,
     presentation_category,
+    preview_cell_label,
     edge_connected_index_offsets,
     expected_tile_opaque_pixels,
+    resolve_game_path,
     should_preserve_full_palette,
     should_recover_enclosed_transparency,
+    steam_installdir,
     tile_v3_to_image,
     tile_v1_to_image,
     tile_to_category_image,
+    validate_output_root,
 )
 
 
@@ -197,6 +205,161 @@ class PresentationArtTests(unittest.TestCase):
         self.assertEqual(icon.getpixel((2, 1)), (240, 241, 242, 255))
         self.assertEqual(sprite.getpixel((1, 1))[3], 0)
         self.assertEqual(sprite.getpixel((2, 1))[3], 0)
+
+
+class OutputSafetyTests(unittest.TestCase):
+    """The output folder is wiped with rmtree, so this guard is the only thing
+    between a mistyped --out and real data loss."""
+
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.base = Path(self._temp.name)
+        self.game = self.base / "game" / "Majesty HD"
+        (self.game / "Data").mkdir(parents=True)
+        (self.game / "Data" / "maindata.cam").touch()
+        (self.game / "Data" / "interfacedata.cam").touch()
+        self.addCleanup(self._temp.cleanup)
+
+    def assertRefused(self, target: Path) -> None:
+        with self.assertRaises(ValueError):
+            validate_output_root(self.game, target)
+
+    def assertAllowed(self, target: Path) -> None:
+        validate_output_root(self.game, target)
+
+    def test_new_and_empty_folders_are_allowed(self):
+        self.assertAllowed(self.base / "does-not-exist-yet")
+        empty = self.base / "empty"
+        empty.mkdir()
+        self.assertAllowed(empty)
+
+    def test_folder_from_a_previous_run_is_allowed(self):
+        previous = self.base / "previous"
+        previous.mkdir()
+        (previous / OUTPUT_MARKER).write_text("x", encoding="utf-8")
+        (previous / "heroes").mkdir()
+        self.assertAllowed(previous)
+
+    def test_folder_holding_unrelated_files_is_refused(self):
+        theirs = self.base / "documents"
+        theirs.mkdir()
+        (theirs / "taxes.pdf").write_bytes(b"x")
+        self.assertRefused(theirs)
+
+    def test_the_game_and_anything_around_it_is_refused(self):
+        self.assertRefused(self.game)
+        self.assertRefused(self.game / "Data")
+        self.assertRefused(self.game.parent)
+
+    def test_drive_root_is_refused(self):
+        self.assertRefused(Path(Path.cwd().anchor))
+
+    def test_windows_and_profile_folders_are_refused(self):
+        for name in ("SystemRoot", "ProgramFiles", "USERPROFILE"):
+            value = os.environ.get(name)
+            if value:
+                self.assertRefused(Path(value))
+
+    def test_a_file_is_not_a_valid_output_folder(self):
+        target = self.base / "a-file.txt"
+        target.write_text("x", encoding="utf-8")
+        self.assertRefused(target)
+
+    def test_confirmation_is_not_needed_when_nothing_would_be_lost(self):
+        missing = self.base / "nope"
+        self.assertTrue(confirm_output_clear(missing))
+        empty = self.base / "blank"
+        empty.mkdir()
+        self.assertTrue(confirm_output_clear(empty))
+        marked = self.base / "marked"
+        marked.mkdir()
+        (marked / OUTPUT_MARKER).write_text("x", encoding="utf-8")
+        self.assertTrue(confirm_output_clear(marked))
+
+    def test_assume_yes_skips_the_prompt(self):
+        folder = self.base / "full"
+        folder.mkdir()
+        (folder / "old.png").write_bytes(b"x")
+        self.assertTrue(confirm_output_clear(folder, assume_yes=True))
+
+    def test_is_inside_is_case_insensitive_and_not_prefix_fooled(self):
+        self.assertTrue(is_inside(Path(r"C:\Games\Majesty HD\Data"), Path(r"c:\games\majesty hd")))
+        self.assertFalse(is_inside(Path(r"C:\Games\Majesty HD2"), Path(r"C:\Games\Majesty HD")))
+
+
+class Rgb565BackgroundTests(unittest.TestCase):
+    """RGB565 has no alpha, so 0x0000 is both pure black and the sprite cutout.
+
+    Reading it as transparent everywhere removed 4.5% of the main menu backdrop
+    while leaving pixels one step off black intact.
+    """
+
+    @staticmethod
+    def _tile(values: list[int]) -> bytes:
+        width, height = len(values), 1
+        header = bytearray(26)
+        struct.pack_into("<HHH", header, 0, 1, height, width)
+        struct.pack_into("<H", header, 6, width * 2)
+        return bytes(header) + b"".join(struct.pack("<H", v) for v in values)
+
+    def test_background_art_keeps_its_black_pixels(self):
+        tile = self._tile([0x0000, 0xF800, 0x0000])
+        image = tile_v1_to_image(tile, None, preserve_full_palette=True)
+        self.assertEqual(image.size, (3, 1))
+        self.assertEqual(image.getpixel((0, 0)), (0, 0, 0, 255))
+        self.assertEqual(image.getpixel((2, 0)), (0, 0, 0, 255))
+
+    def test_sprite_art_still_cuts_out_on_black(self):
+        tile = self._tile([0x0000, 0xF800, 0x0000])
+        image = tile_v1_to_image(tile, None, preserve_full_palette=False)
+        # Cropped to the one visible pixel.
+        self.assertEqual(image.size, (1, 1))
+        self.assertEqual(image.getpixel((0, 0))[3], 255)
+
+    def test_near_black_survives_either_way(self):
+        tile = self._tile([0x0001])
+        for preserve in (True, False):
+            image = tile_v1_to_image(tile, None, preserve_full_palette=preserve)
+            self.assertEqual(image.getpixel((0, 0))[3], 255)
+
+    def test_the_audit_agrees_with_the_renderer(self):
+        tile = self._tile([0x0000, 0xF800, 0x0000])
+        for category, expected in (("menus/main", 3), ("heroes/sprites", 1)):
+            image = tile_to_category_image(tile, None, category, clean_art=True)
+            opaque = sum(1 for a in image.convert("RGBA").getchannel("A").getdata() if a > 0)
+            counted = expected_tile_opaque_pixels(tile, None, category, clean_art=True)
+            self.assertEqual(opaque, expected, category)
+            self.assertEqual(counted, expected, category)
+
+
+class PreviewLabelTests(unittest.TestCase):
+    def test_direction_is_included_so_cells_differ(self):
+        first = preview_cell_label({"set": "Stand", "direction": "2", "frame": "0"})
+        second = preview_cell_label({"set": "Stand", "direction": "3", "frame": "0"})
+        self.assertEqual(first, "Stand d2 f0")
+        self.assertNotEqual(first, second)
+
+    def test_non_directional_rows_stay_short(self):
+        self.assertEqual(preview_cell_label({"set": "Active", "direction": "", "frame": "1"}), "Active f1")
+
+    def test_empty_row_still_gets_a_label(self):
+        self.assertEqual(preview_cell_label({}), "frame")
+
+
+class GameDiscoveryTests(unittest.TestCase):
+    def test_explicit_game_folder_is_validated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(SystemExit):
+                resolve_game_path(Path(temp))
+
+    def test_installdir_is_read_from_an_app_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manifest = Path(temp) / "appmanifest_73230.acf"
+            manifest.write_text('"AppState"\n{\n\t"installdir"\t\t"Majesty Renamed"\n}\n', encoding="utf-8")
+            self.assertEqual(steam_installdir(manifest), "Majesty Renamed")
+
+    def test_missing_manifest_is_not_an_error(self):
+        self.assertIsNone(steam_installdir(Path("nope") / "appmanifest_73230.acf"))
 
 
 def _tile_v3(*, x_end: int, pixels: bytes, flags: int) -> bytes:

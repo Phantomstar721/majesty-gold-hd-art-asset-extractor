@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Export a Majesty unit animation as a sprite sheet + JSON sidecar for AI re-art."""
+"""Export one animation of a Majesty unit as a single sprite sheet plus a
+manifest describing which source tile each cell came from.
+
+Frames are laid out one direction per row, aligned on the hotspot the archive
+stores, so the sheet reads the way the animation plays rather than as a pile of
+separately cropped tiles.
+"""
 
 from __future__ import annotations
 
@@ -14,15 +20,68 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from extract_assets import (  # noqa: E402
+    decode_tile_v3,
     get_sections,
+    is_palette_key_color,
     load_palette,
     parse_anim_set,
     parse_directional_frame_descriptor,
     read_cam,
     resolve_game_path,
     safe_name,
+    u16,
+    u32,
 )
-from sprite_codec import header_words, render_tile_full  # noqa: E402
+
+
+def header_words(tile_data: bytes) -> dict[str, int]:
+    """The TILE header fields this exporter needs."""
+    return {
+        "height": u16(tile_data, 2),
+        "width": u16(tile_data, 4),
+        "w3": u16(tile_data, 6),
+        "w4": u16(tile_data, 8),
+        "w5": u16(tile_data, 10),
+        "w6": u16(tile_data, 12),
+        "w7": u16(tile_data, 14),
+        "palette_id": u32(tile_data, 22),
+    }
+
+
+def render_tile_full(
+    tile_data: bytes,
+    palette: list[tuple[int, int, int]] | None,
+    *,
+    drop_shadow: bool = True,
+) -> Image.Image | None:
+    """Render a TILE v3 onto its full canvas without cropping to content.
+
+    The extractor's own renderer crops to the visible bounding box, which is
+    right for a standalone PNG but wrong here: every frame of an animation has
+    to stay on a common canvas or the sheet will not line up.
+    """
+    decoded = decode_tile_v3(tile_data)
+    if decoded is None:
+        return None
+    width = int(decoded["width"])
+    height = int(decoded["height"])
+    if width <= 0 or height <= 0:
+        return None
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for y, segments in enumerate(decoded["rows"]):
+        for x_start, pixels in segments:
+            for dx, index in enumerate(pixels):
+                x = int(x_start) + dx
+                if x < 0 or x >= width:
+                    continue
+                if palette is None:
+                    image.putpixel((x, y), (index, index, index, 255))
+                    continue
+                red, green, blue = palette[index]
+                if drop_shadow and is_palette_key_color(index, red, green, blue):
+                    continue
+                image.putpixel((x, y), (red, green, blue, 255))
+    return image
 
 
 def find_imag_entry(imag, prefix: str):

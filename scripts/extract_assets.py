@@ -9,6 +9,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -717,7 +718,15 @@ def tile_v1_to_image(
     if width <= 0 or height <= 0:
         return None
     if row_stride == width * 2 and 26 + height * row_stride <= len(tile_data):
-        return tile_v1_rgb565_to_image(tile_data, width, height, row_stride)
+        # Full-background art keeps its black. Sprite-shaped art continues to
+        # read 0x0000 as the cutout, which is what gives it a silhouette.
+        return tile_v1_rgb565_to_image(
+            tile_data,
+            width,
+            height,
+            row_stride,
+            black_is_transparent=not preserve_full_palette,
+        )
     pixel_count = row_stride * height
     if row_stride < width or 26 + pixel_count > len(tile_data):
         return None
@@ -756,19 +765,42 @@ def tile_v1_to_image(
     return image.crop(bbox) if bbox else image
 
 
-def tile_v1_rgb565_to_image(tile_data: bytes, width: int, height: int, row_stride: int) -> Image.Image | None:
+def tile_v1_rgb565_to_image(
+    tile_data: bytes,
+    width: int,
+    height: int,
+    row_stride: int,
+    *,
+    black_is_transparent: bool = True,
+) -> Image.Image | None:
+    """Decode a 16-bit RGB565 version 1 TILE.
+
+    RGB565 has no alpha channel and no transparent-index field, so 0x0000 has
+    to serve double duty: it is both pure black and the only value a sprite can
+    use for its cutout. Which one it means depends on the art.
+
+    For full-screen backgrounds it means black, and dropping it punches holes
+    through the artwork. The main menu backdrop stores 17,801 such pixels, and
+    treating them as transparent removed 4.5% of the image, while the 28,237
+    pixels that are one step off black survived. Callers pass
+    black_is_transparent=False for background art to keep it whole.
+    """
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     pixels_start = 26
     for y in range(height):
         row_start = pixels_start + y * row_stride
         for x in range(width):
             value = u16(tile_data, row_start + x * 2)
-            if value == 0:
+            if value == 0 and black_is_transparent:
                 continue
             red = ((value >> 11) & 0x1F) * 255 // 31
             green = ((value >> 5) & 0x3F) * 255 // 63
             blue = (value & 0x1F) * 255 // 31
             image.putpixel((x, y), (red, green, blue, 255))
+    if not black_is_transparent:
+        # Every pixel is opaque, so a bbox crop would only ever be a no-op that
+        # risks trimming legitimately black edges.
+        return image
     bbox = image.getbbox()
     return image.crop(bbox) if bbox else image
 
@@ -874,6 +906,13 @@ def get_sections(archive: CamArchive) -> tuple[CamSection | None, CamSection | N
 
 def resolve_game_path(explicit_game: Path | None) -> Path:
     if explicit_game is not None:
+        # Checked here rather than left to fail deep inside the extraction with
+        # a confusing missing-file error.
+        if not is_game_folder(explicit_game):
+            raise SystemExit(
+                f"That folder does not look like a Majesty HD installation:\n  {explicit_game}\n"
+                "Expected it to contain Data\\maindata.cam and Data\\interfacedata.cam."
+            )
         return explicit_game
 
     for candidate in discover_game_paths():
@@ -887,6 +926,9 @@ def resolve_game_path(explicit_game: Path | None) -> Path:
     )
 
 
+MAJESTY_STEAM_APP_ID = "73230"
+
+
 def discover_game_paths() -> list[Path]:
     candidates: list[Path] = []
 
@@ -897,15 +939,22 @@ def discover_game_paths() -> list[Path]:
     candidates.append(DEFAULT_GAME)
 
     for steam_root in steam_roots():
-        candidates.append(steam_root / "steamapps" / "common" / "Majesty HD")
-        library_vdf = steam_root / "steamapps" / "libraryfolders.vdf"
-        for library in steam_libraries_from_vdf(library_vdf):
-            candidates.append(library / "steamapps" / "common" / "Majesty HD")
+        for library in [steam_root, *steam_libraries_from_vdf(
+            steam_root / "steamapps" / "libraryfolders.vdf"
+        )]:
+            steamapps = library / "steamapps"
+            candidates.append(steamapps / "common" / "Majesty HD")
+            # The folder is only called "Majesty HD" by default. The app
+            # manifest records what it is actually called, which is the only
+            # way to find a renamed install.
+            installdir = steam_installdir(steamapps / f"appmanifest_{MAJESTY_STEAM_APP_ID}.acf")
+            if installdir:
+                candidates.append(steamapps / "common" / installdir)
 
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
-        key = str(candidate).lower()
+        key = os.path.normcase(str(candidate))
         if key not in seen:
             unique.append(candidate)
             seen.add(key)
@@ -913,15 +962,53 @@ def discover_game_paths() -> list[Path]:
 
 
 def steam_roots() -> list[Path]:
-    roots = [
-        Path(r"C:\Program Files (x86)\Steam"),
-        Path(r"C:\Program Files\Steam"),
-    ]
+    roots: list[Path] = []
+
+    # The registry is authoritative when Steam is installed somewhere unusual.
+    for hive, subkey, value in (
+        ("HKCU", r"Software\Valve\Steam", "SteamPath"),
+        ("HKLM", r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        ("HKLM", r"SOFTWARE\Valve\Steam", "InstallPath"),
+    ):
+        path = read_registry_path(hive, subkey, value)
+        if path:
+            roots.append(path)
+
     for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
         root = os.environ.get(env_name)
         if root:
             roots.append(Path(root) / "Steam")
+
+    roots.append(Path(r"C:\Program Files (x86)\Steam"))
+    roots.append(Path(r"C:\Program Files\Steam"))
     return roots
+
+
+def read_registry_path(hive: str, subkey: str, value_name: str) -> Path | None:
+    """Read one registry string. Returns None whenever anything is missing."""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    root = winreg.HKEY_CURRENT_USER if hive == "HKCU" else winreg.HKEY_LOCAL_MACHINE
+    try:
+        with winreg.OpenKey(root, subkey) as key:
+            value, _kind = winreg.QueryValueEx(key, value_name)
+    except OSError:
+        return None
+    return Path(value) if value else None
+
+
+def steam_installdir(manifest_path: Path) -> str | None:
+    """Read "installdir" out of a Steam appmanifest_<id>.acf."""
+    if not manifest_path.is_file():
+        return None
+    try:
+        text = manifest_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    match = re.search(r'"installdir"\s+"([^"]+)"', text, re.IGNORECASE)
+    return match.group(1) if match else None
 
 
 def steam_libraries_from_vdf(path: Path) -> list[Path]:
@@ -1537,6 +1624,10 @@ def expected_tile_opaque_pixels(
     if width <= 0 or height <= 0:
         return None
     if row_stride == width * 2 and 26 + height * row_stride <= len(tile_data):
+        # Mirrors tile_v1_rgb565_to_image: background art keeps its black
+        # pixels, so every stored pixel is opaque.
+        if preserve_full_palette:
+            return width * height
         return sum(u16(tile_data, 26 + y * row_stride + x * 2) != 0 for y in range(height) for x in range(width))
     if row_stride < width or 26 + height * row_stride > len(tile_data):
         return None
@@ -1642,6 +1733,25 @@ def audit_extracted_tile_occupancy(
     return checked
 
 
+def finish_limited_run(output_root: Path, manifest: list[dict[str, object]], total: int) -> int:
+    """Wrap up a --limit run.
+
+    A limited run stops partway through the archives, so presentation art is
+    never reached and the source-pixel audit has nothing complete to check.
+    Both are skipped, and both are said out loud: a partial run that printed
+    nothing about the audit would read as though it had passed.
+    """
+    print(f"Writing manifest and previews for {total} files...", flush=True)
+    write_manifest(output_root, manifest)
+    create_previews(output_root, manifest)
+    print(
+        "\nThis was a --limit sample run. Presentation art was not extracted and\n"
+        "the source-pixel audit did not run. Use a full run to verify output.",
+        flush=True,
+    )
+    return total
+
+
 def extract_assets(
     game: Path,
     output_root: Path,
@@ -1657,6 +1767,9 @@ def extract_assets(
         print(f"Clearing previous output: {output_root}", flush=True)
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    # Written before any art so an interrupted run still marks the folder as
+    # ours, which is what lets the next run clear it.
+    (output_root / OUTPUT_MARKER).write_text(OUTPUT_MARKER_TEXT, encoding="utf-8")
 
     manifest: list[dict[str, object]] = []
     total = 0
@@ -1689,10 +1802,7 @@ def extract_assets(
                 total += count
                 records_done += 1
                 if limit is not None and records_done >= limit:
-                    print(f"Writing manifest and previews for {total} files...", flush=True)
-                    write_manifest(output_root, manifest)
-                    create_previews(output_root, manifest)
-                    return total
+                    return finish_limited_run(output_root, manifest, total)
 
     print("Extracting curated interface records...", flush=True)
     interface_palette_fallback: CamSection | None = None
@@ -1718,10 +1828,7 @@ def extract_assets(
                 total += count
                 records_done += 1
                 if limit is not None and records_done >= limit:
-                    print(f"Writing manifest and previews for {total} files...", flush=True)
-                    write_manifest(output_root, manifest)
-                    create_previews(output_root, manifest)
-                    return total
+                    return finish_limited_run(output_root, manifest, total)
 
     total += export_presentation_art(
         game,
@@ -1746,15 +1853,122 @@ def extract_assets(
     return total
 
 
-def validate_output_root(game: Path, output_root: Path) -> None:
-    resolved_output = output_root.resolve()
-    resolved_game = game.resolve()
-    resolved_cwd = Path.cwd().resolve()
-    drive_root = Path(resolved_output.anchor).resolve()
+OUTPUT_MARKER = ".majesty-art-extractor-output"
 
-    blocked = {drive_root, resolved_game, resolved_game.parent, resolved_cwd, resolved_cwd.parent}
-    if resolved_output in blocked:
-        raise ValueError(f"Refusing to clear unsafe output folder: {output_root}")
+OUTPUT_MARKER_TEXT = (
+    "This folder is managed by the Majesty Gold HD art asset extractor.\n"
+    "Everything in it is deleted and rebuilt at the start of each run.\n"
+    "Do not store anything here that you want to keep.\n"
+)
+
+
+def protected_output_roots() -> list[Path]:
+    """Folders that must never be handed to rmtree.
+
+    Windows-only, matching the game. Resolution failures are ignored so a
+    missing OneDrive or relocated profile folder cannot break the check.
+    """
+    candidates: list[Path] = []
+
+    for name in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        value = os.environ.get(name)
+        if value:
+            candidates.append(Path(value))
+
+    profile = os.environ.get("USERPROFILE")
+    if profile:
+        home = Path(profile)
+        candidates.append(home)
+        candidates.extend(
+            home / child
+            for child in (
+                "Desktop", "Documents", "Downloads", "Pictures",
+                "Music", "Videos", "OneDrive", "AppData", "Saved Games",
+            )
+        )
+
+    public = os.environ.get("PUBLIC")
+    if public:
+        candidates.append(Path(public))
+
+    resolved: list[Path] = []
+    for candidate in candidates:
+        try:
+            resolved.append(candidate.resolve())
+        except OSError:
+            continue
+    return resolved
+
+
+def validate_output_root(game: Path, output_root: Path) -> None:
+    """Refuse output folders where a full delete would be destructive.
+
+    The output folder is cleared with rmtree at the start of every run, so this
+    is the only thing standing between a mistyped --out and real data loss. It
+    checks three separate ways rather than matching a short list of exact paths:
+
+    1. The folder must not be a drive root or a known Windows/profile folder.
+    2. It must not be, contain, or sit inside the game installation, and it must
+       not contain this tool.
+    3. If it already exists with contents, it must carry this tool's marker
+       file, proving a previous run created it. That is what protects folders
+       nobody could enumerate in advance.
+    """
+    try:
+        resolved_output = output_root.resolve()
+    except OSError as error:
+        raise ValueError(f"Output folder path cannot be resolved: {output_root}") from error
+    resolved_game = game.resolve()
+    resolved_tool = TOOL_ROOT.resolve()
+
+    def refuse(reason: str) -> None:
+        raise ValueError(
+            f"Refusing to use this output folder:\n  {resolved_output}\n{reason}\n"
+            "Pick an empty folder, or one created by a previous extraction."
+        )
+
+    if resolved_output == Path(resolved_output.anchor):
+        refuse("  That is the root of a drive.")
+
+    if resolved_output in protected_output_roots():
+        refuse("  That is a Windows system or user profile folder.")
+
+    if resolved_output == resolved_game:
+        refuse("  That is the game installation.")
+    if is_inside(resolved_output, resolved_game):
+        refuse("  That is inside the game installation.")
+    if is_inside(resolved_game, resolved_output):
+        refuse("  The game installation is inside it, so clearing it would delete the game.")
+    if is_inside(resolved_tool, resolved_output):
+        refuse("  This extractor is inside it, so clearing it would delete the tool.")
+
+    # An existing folder is only cleared when a previous run left its marker.
+    if resolved_output.exists():
+        if not resolved_output.is_dir():
+            refuse("  That path is a file, not a folder.")
+        try:
+            has_contents = any(resolved_output.iterdir())
+        except OSError as error:
+            raise ValueError(f"Output folder cannot be read: {resolved_output}") from error
+        if has_contents and not (resolved_output / OUTPUT_MARKER).exists():
+            refuse(
+                "  It already contains files and was not created by this tool.\n"
+                "  Everything in the output folder is deleted at the start of a run,\n"
+                "  so this is refused rather than risking your files."
+            )
+
+
+def is_inside(path: Path, parent: Path) -> bool:
+    """True when path sits under parent. Windows paths compare case-insensitively."""
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        pass
+    try:
+        return os.path.normcase(str(path)).startswith(os.path.normcase(str(parent)) + os.sep)
+    except (TypeError, ValueError):
+        return False
 
 
 def write_manifest(output_root: Path, manifest: list[dict[str, object]]) -> None:
@@ -1984,9 +2198,24 @@ def build_contact_sheet(images: list[tuple[dict[str, object], Image.Image]]) -> 
         scaled.thumbnail((cell_w - 8, cell_h - 8), Image.Resampling.NEAREST)
         tile.alpha_composite(scaled, ((cell_w - scaled.width) // 2, (cell_h - scaled.height) // 2))
         sheet.alpha_composite(tile, (x, y))
-        label = f"{row['set']} {row['frame']}"
-        draw_label(sheet, label[:24], x + 4, y + cell_h + 2)
+        draw_label(sheet, preview_cell_label(row)[:24], x + 4, y + cell_h + 2)
     return sheet
+
+
+def preview_cell_label(row: dict[str, object]) -> str:
+    """Name a preview cell so neighbouring cells are told apart.
+
+    A directional record contributes one cell per facing, and labelling them by
+    set and frame alone made every cell of a hero sheet read "Stand 0".
+    """
+    parts = [str(row.get("set", "")).strip()]
+    direction = str(row.get("direction", "")).strip()
+    if direction:
+        parts.append(f"d{direction}")
+    frame = str(row.get("frame", "")).strip()
+    if frame:
+        parts.append(f"f{frame}")
+    return " ".join(part for part in parts if part) or "frame"
 
 
 def draw_label(image: Image.Image, text: str, x: int, y: int) -> None:
@@ -2046,6 +2275,45 @@ def estimate_output_size(game: Path, mode: ExtractionMode | str) -> int:
     return int(art_source_bytes * 0.45 + presentation_source_bytes * 0.80)
 
 
+def confirm_output_clear(output_root: Path, *, assume_yes: bool = False) -> bool:
+    """Ask before deleting an existing output folder. True means go ahead.
+
+    Only reached for folders validate_output_root already accepted, so this is
+    a second look rather than the safety net. Returns True without asking when
+    there is nothing to lose, or when stdin is not a terminal, which keeps the
+    GUI and scripted runs working; the GUI asks its own question first.
+    """
+    if assume_yes or not output_root.exists():
+        return True
+    try:
+        entries = list(output_root.iterdir())
+    except OSError:
+        return True
+    removable = [entry for entry in entries if entry.name != OUTPUT_MARKER]
+    if not removable:
+        return True
+    if not sys.stdin or not sys.stdin.isatty():
+        return True
+
+    print(f"\nThis folder already holds {len(removable):,} items and will be emptied first:")
+    print(f"  {output_root}")
+    for entry in sorted(removable, key=lambda item: item.name)[:8]:
+        print(f"    {entry.name}{'/' if entry.is_dir() else ''}")
+    if len(removable) > 8:
+        print(f"    ... and {len(removable) - 8:,} more")
+    try:
+        answer = input("Delete this folder's contents and continue? [y/N] ")
+    except EOFError:
+        # No console to answer on. Cancelling is the safe default; say how to
+        # proceed deliberately instead of leaving the user guessing.
+        print("\nNo console input available. Re-run with --yes to confirm.")
+        return False
+    except KeyboardInterrupt:
+        print()
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
 def format_bytes(size: int) -> str:
     value = float(max(0, size))
     for unit in ("bytes", "KB", "MB", "GB", "TB"):
@@ -2072,10 +2340,22 @@ def main() -> int:
     )
     parser.add_argument("--limit", type=int, help="Stop after this many IMAG records with extracted PNGs")
     parser.add_argument("--zip", action="store_true", help="Create a local zip next to the output folder")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation prompt shown before an existing output folder is cleared",
+    )
     args = parser.parse_args()
 
     game = resolve_game_path(args.game)
     output = args.out if args.out.is_absolute() else TOOL_ROOT / args.out
+
+    # Checked before the prompt so an unsafe path is rejected outright rather
+    # than offered as something the user can confirm their way past.
+    validate_output_root(game, output)
+    if not confirm_output_clear(output, assume_yes=args.yes):
+        print("Cancelled. Nothing was changed.")
+        return 1
 
     mode = ExtractionMode.ALL_RAW if args.full else ExtractionMode(args.mode)
     total = extract_mode(game, output, mode, limit=args.limit)

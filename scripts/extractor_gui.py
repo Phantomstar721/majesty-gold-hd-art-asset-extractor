@@ -1,3 +1,14 @@
+"""Windowed front end for the Majesty Gold HD art extractor.
+
+Standard library only. tkinter ships with Python on Windows, so the tool stays
+a download-and-run affair with no packaging step.
+
+The palette is sampled from the game's own interface art rather than invented:
+warm near-black stone (#181410 through #403830), aged gold filigree (#d8a058),
+and parchment text. Ornaments are drawn with Canvas primitives so there are no
+image files to ship.
+"""
+
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
@@ -7,7 +18,7 @@ import queue
 import shutil
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from extract_assets import (
     DEFAULT_OUT,
@@ -21,21 +32,23 @@ from extract_assets import (
 
 
 COLORS = {
-    "window": "#0b1020",
-    "surface": "#141b2d",
-    "surface_alt": "#192338",
-    "surface_selected": "#1d2a43",
-    "border": "#2b3851",
-    "text": "#f4f7fb",
-    "muted": "#a8b3c7",
-    "faint": "#75839c",
-    "accent": "#d7a84a",
-    "accent_hover": "#e4bb65",
-    "accent_text": "#17120a",
-    "success": "#62d6a5",
-    "warning": "#f3bd63",
-    "error": "#ff7b83",
-    "input": "#0e1526",
+    "window": "#12100c",
+    "surface": "#1e1a14",
+    "surface_alt": "#282016",
+    "surface_selected": "#33291b",
+    "border": "#4a4038",
+    "border_lit": "#6b5a3c",
+    "gold": "#d8a058",
+    "gold_lit": "#eac278",
+    "gold_dim": "#8a6f42",
+    "gold_text": "#1a1206",
+    "text": "#ece3d0",
+    "muted": "#a89880",
+    "faint": "#7a6c5a",
+    "success": "#8fbf7a",
+    "warning": "#e0b060",
+    "error": "#d97a62",
+    "input": "#0d0b08",
 }
 
 
@@ -73,6 +86,45 @@ MODE_CONTENT = {
 }
 
 
+# Milestones the extractor prints, mapped to a share of the run. This is what
+# turns the progress bar from a barber pole into something honest.
+PROGRESS_STAGES = (
+    ("Extracting game art records", 4),
+    ("Extracting curated interface records", 34),
+    ("Extracting maps, cinematics", 52),
+    ("Auditing decoded TILE pixels", 78),
+    ("Writing manifest", 92),
+    ("Creating preview sheets", 96),
+    ("Extraction stages finished", 99),
+)
+
+
+def enable_dpi_awareness() -> None:
+    """Stop Windows from bitmap-scaling the window into a blur."""
+    try:
+        import ctypes
+
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # per-monitor
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError, ImportError):
+        pass
+
+
+def pick_font(root: tk.Tk, candidates: tuple[str, ...], fallback: str) -> str:
+    """First installed family from candidates.
+
+    Named families are not guaranteed present, and tkinter silently substitutes
+    something arbitrary when one is missing rather than telling you.
+    """
+    available = {name.lower() for name in tkfont.families(root)}
+    for name in candidates:
+        if name.lower() in available:
+            return name
+    return fallback
+
+
 class QueueWriter:
     def __init__(self, messages: queue.Queue[tuple[str, object]]) -> None:
         self.messages = messages
@@ -90,14 +142,22 @@ class ExtractorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Majesty Gold HD Art Extractor")
-        self.root.geometry("980x720")
-        self.root.minsize(940, 680)
+        self.root.geometry("1000x730")
+        self.root.minsize(940, 690)
         self.root.configure(background=COLORS["window"])
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.running = False
-        self.details_visible = False
         self.mode_cards: dict[ExtractionMode, tuple[tk.Frame, list[tk.Widget]]] = {}
+        self.mode_radios: dict[ExtractionMode, tk.Radiobutton] = {}
+
+        self.ui_family = pick_font(root, ("Segoe UI", "Tahoma", "Verdana"), "TkDefaultFont")
+        self.head_family = pick_font(
+            root, ("Trajan Pro", "Georgia", "Palatino Linotype", "Book Antiqua", "Segoe UI Semibold"), self.ui_family
+        )
+        self.mono_family = pick_font(
+            root, ("Cascadia Mono", "Consolas", "Lucida Console", "Courier New"), "TkFixedFont"
+        )
 
         try:
             default_game = str(resolve_game_path(None))
@@ -121,6 +181,8 @@ class ExtractorApp:
         self.root.after(100, self._poll_messages)
         self._mode_changed()
 
+    # ---------------------------------------------------------------- styling
+
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
         try:
@@ -134,102 +196,191 @@ class ExtractorApp:
             bordercolor=COLORS["border"],
             lightcolor=COLORS["border"],
             darkcolor=COLORS["border"],
-            insertcolor=COLORS["text"],
+            insertcolor=COLORS["gold"],
             padding=(10, 8),
         )
         style.map(
             "Modern.TEntry",
-            bordercolor=[("focus", COLORS["accent"])],
-            lightcolor=[("focus", COLORS["accent"])],
-            darkcolor=[("focus", COLORS["accent"])],
+            bordercolor=[("focus", COLORS["gold"])],
+            lightcolor=[("focus", COLORS["gold"])],
+            darkcolor=[("focus", COLORS["gold"])],
+            fieldbackground=[("disabled", COLORS["surface"])],
+            foreground=[("disabled", COLORS["faint"])],
         )
         style.configure(
             "Secondary.TButton",
             background=COLORS["surface_alt"],
             foreground=COLORS["text"],
-            borderwidth=0,
+            bordercolor=COLORS["border"],
+            borderwidth=1,
             padding=(14, 9),
-            font=("Segoe UI", 9, "bold"),
+            font=(self.ui_family, 9, "bold"),
         )
         style.map(
             "Secondary.TButton",
-            background=[("active", COLORS["border"]), ("disabled", COLORS["surface"])],
+            background=[("active", COLORS["surface_selected"]), ("disabled", COLORS["surface"])],
+            bordercolor=[("active", COLORS["border_lit"])],
             foreground=[("disabled", COLORS["faint"])],
         )
         style.configure(
             "Primary.TButton",
-            background=COLORS["accent"],
-            foreground=COLORS["accent_text"],
-            borderwidth=0,
-            padding=(20, 11),
-            font=("Segoe UI", 10, "bold"),
+            background=COLORS["gold"],
+            foreground=COLORS["gold_text"],
+            bordercolor=COLORS["gold_lit"],
+            borderwidth=1,
+            padding=(22, 11),
+            font=(self.ui_family, 10, "bold"),
         )
         style.map(
             "Primary.TButton",
-            background=[("active", COLORS["accent_hover"]), ("disabled", COLORS["border"])],
+            background=[("active", COLORS["gold_lit"]), ("disabled", COLORS["gold_dim"])],
             foreground=[("disabled", COLORS["faint"])],
         )
         style.configure(
             "Gold.Horizontal.TProgressbar",
             troughcolor=COLORS["input"],
-            background=COLORS["accent"],
+            background=COLORS["gold"],
+            bordercolor=COLORS["border"],
+            lightcolor=COLORS["gold_lit"],
+            darkcolor=COLORS["gold_dim"],
             borderwidth=0,
-            thickness=5,
+            thickness=6,
         )
         style.configure(
             "Vertical.TScrollbar",
             troughcolor=COLORS["input"],
             background=COLORS["border"],
+            bordercolor=COLORS["window"],
             borderwidth=0,
             arrowcolor=COLORS["muted"],
         )
 
+    # ------------------------------------------------------------- ornaments
+
+    def _filigree_rule(self, parent: tk.Widget, width: int = 760) -> tk.Canvas:
+        """A gold divider with a centred diamond, echoing the game's panels."""
+        height = 13
+        canvas = tk.Canvas(
+            parent,
+            height=height,
+            width=width,
+            background=COLORS["window"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        mid = height // 2
+
+        def redraw(_event: tk.Event | None = None) -> None:
+            canvas.delete("all")
+            span = canvas.winfo_width() or width
+            centre = span // 2
+            gap = 20
+            # A continuous rule either side of the diamond, with a small hook at
+            # the inner end so it reads as a drawn ornament rather than a border.
+            for direction in (-1, 1):
+                inner = centre + direction * gap
+                outer = 10 if direction < 0 else span - 10
+                canvas.create_line(outer, mid, inner, mid, fill=COLORS["gold_dim"], width=1)
+                canvas.create_line(
+                    inner, mid, inner - direction * 9, mid, fill=COLORS["gold"], width=2
+                )
+                canvas.create_arc(
+                    inner - direction * 9 - 5, mid - 5, inner - direction * 9 + 5, mid + 5,
+                    start=90 if direction < 0 else 0, extent=90,
+                    style="arc", outline=COLORS["gold_dim"],
+                )
+            canvas.create_polygon(
+                centre, mid - 5, centre + 6, mid, centre, mid + 5, centre - 6, mid,
+                fill=COLORS["surface_alt"], outline=COLORS["gold"],
+            )
+            canvas.create_polygon(
+                centre, mid - 2, centre + 2, mid, centre, mid + 2, centre - 2, mid,
+                fill=COLORS["gold_lit"], outline="",
+            )
+
+        canvas.bind("<Configure>", redraw)
+        redraw()
+        return canvas
+
+    def _crest(self, parent: tk.Widget, size: int = 46) -> tk.Canvas:
+        """A small shield mark for the header."""
+        canvas = tk.Canvas(
+            parent,
+            width=size,
+            height=size,
+            background=COLORS["window"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        pad = 4
+        right = size - pad
+        waist = size * 0.60
+        canvas.create_polygon(
+            pad, pad + 3, right, pad + 3, right, waist, size / 2, right, pad, waist,
+            fill=COLORS["surface_alt"], outline=COLORS["gold"], width=2,
+        )
+        canvas.create_line(size / 2, pad + 7, size / 2, right - 7, fill=COLORS["gold_dim"])
+        canvas.create_line(pad + 7, waist - 8, right - 7, waist - 8, fill=COLORS["gold_dim"])
+        for cx, cy in ((size * 0.33, pad + 12), (size * 0.67, pad + 12)):
+            canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2, fill=COLORS["gold"], outline="")
+        canvas.create_polygon(
+            size / 2, waist - 2, size / 2 + 5, waist + 6, size / 2, waist + 14, size / 2 - 5, waist + 6,
+            fill="", outline=COLORS["gold_lit"],
+        )
+        return canvas
+
+    # ---------------------------------------------------------------- layout
+
     def _build(self) -> None:
-        outer = tk.Frame(self.root, background=COLORS["window"], padx=28, pady=14)
+        outer = tk.Frame(self.root, background=COLORS["window"], padx=30, pady=16)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(6, weight=1)
+        outer.rowconfigure(7, weight=1)  # spacer row absorbs vertical growth
 
         header = tk.Frame(outer, background=COLORS["window"])
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        header.columnconfigure(0, weight=1)
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(1, weight=1)
+
+        self._crest(header).grid(row=0, column=0, rowspan=3, sticky="nw", padx=(0, 14), pady=(2, 0))
+
         tk.Label(
             header,
             text="MAJESTY GOLD HD",
             background=COLORS["window"],
-            foreground=COLORS["accent"],
-            font=("Segoe UI", 9, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+            foreground=COLORS["gold"],
+            font=(self.ui_family, 9, "bold"),
+        ).grid(row=0, column=1, sticky="w")
         tk.Label(
             header,
             text="Art Extractor",
             background=COLORS["window"],
             foreground=COLORS["text"],
-            font=("Segoe UI Semibold", 24),
-        ).grid(row=1, column=0, sticky="w")
+            font=(self.head_family, 25),
+        ).grid(row=1, column=1, sticky="w")
         tk.Label(
             header,
-            text="Build an organized, source-verified art library from your local game installation.",
+            text="Build an organized, source-verified art library from your own installation.",
             background=COLORS["window"],
             foreground=COLORS["muted"],
-            font=("Segoe UI", 10),
-        ).grid(row=2, column=0, sticky="w", pady=(3, 0))
-        badge = tk.Label(
+            font=(self.ui_family, 10),
+        ).grid(row=2, column=1, sticky="w", pady=(3, 0))
+        tk.Label(
             header,
-            text="LOCAL ONLY  ·  GAME FILES STAY UNCHANGED",
+            text="LOCAL ONLY  ·  GAME FILES ARE ONLY READ",
             background=COLORS["surface_alt"],
             foreground=COLORS["success"],
-            font=("Segoe UI", 8, "bold"),
+            font=(self.ui_family, 8, "bold"),
             padx=12,
             pady=7,
-        )
-        badge.grid(row=0, column=1, rowspan=2, sticky="ne")
+        ).grid(row=0, column=2, rowspan=2, sticky="ne")
 
-        paths = self._card(outer, pady=12)
-        paths.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        self._filigree_rule(outer).grid(row=1, column=0, sticky="ew", pady=(10, 12))
+
+        paths = self._card(outer, pady=13)
+        paths.grid(row=2, column=0, sticky="ew", pady=(0, 13))
         paths.columnconfigure(0, weight=1)
         paths.columnconfigure(1, weight=1)
-        self._section_title(paths, "Locations", "The game is read-only; only the destination is written.", 0)
+        self._section_title(paths, "Locations", "The game is only read from; only the destination is written to.", 0)
 
         location_grid = tk.Frame(paths, background=COLORS["surface"])
         location_grid.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(11, 0))
@@ -244,14 +395,14 @@ class ExtractorApp:
             text="GAME INSTALLATION",
             background=COLORS["surface"],
             foreground=COLORS["faint"],
-            font=("Segoe UI", 8, "bold"),
+            font=(self.ui_family, 8, "bold"),
         ).grid(row=0, column=0, sticky="w")
         self.game_status = tk.Label(
             game_group,
             textvariable=self.game_status_var,
             background=COLORS["surface"],
             foreground=COLORS["success"],
-            font=("Segoe UI", 8),
+            font=(self.ui_family, 8),
         )
         self.game_status.grid(row=0, column=1, sticky="e")
         self.game_entry = ttk.Entry(game_group, textvariable=self.game_var, style="Modern.TEntry")
@@ -267,32 +418,34 @@ class ExtractorApp:
             text="SAVE ART TO",
             background=COLORS["surface"],
             foreground=COLORS["faint"],
-            font=("Segoe UI", 8, "bold"),
+            font=(self.ui_family, 8, "bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w")
         self.output_entry = ttk.Entry(output_group, textvariable=self.output_var, style="Modern.TEntry")
         self.output_entry.grid(row=1, column=0, sticky="ew", pady=(5, 0))
-        self.output_button = ttk.Button(output_group, text="Browse", style="Secondary.TButton", command=self._choose_output)
+        self.output_button = ttk.Button(
+            output_group, text="Browse", style="Secondary.TButton", command=self._choose_output
+        )
         self.output_button.grid(row=1, column=1, padx=(8, 0), pady=(5, 0))
 
         mode_header = tk.Frame(outer, background=COLORS["window"])
-        mode_header.grid(row=2, column=0, sticky="ew", pady=(0, 9))
+        mode_header.grid(row=3, column=0, sticky="ew", pady=(0, 9))
         tk.Label(
             mode_header,
             text="Choose an extraction",
             background=COLORS["window"],
             foreground=COLORS["text"],
-            font=("Segoe UI Semibold", 13),
+            font=(self.head_family, 14),
         ).pack(side="left")
         tk.Label(
             mode_header,
             text="All three include menus, maps, loading art, segues, and playable cinematics.",
             background=COLORS["window"],
             foreground=COLORS["faint"],
-            font=("Segoe UI", 9),
+            font=(self.ui_family, 9),
         ).pack(side="right")
 
         modes = tk.Frame(outer, background=COLORS["window"])
-        modes.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        modes.grid(row=4, column=0, sticky="ew", pady=(0, 13))
         for column in range(3):
             modes.columnconfigure(column, weight=1, uniform="mode")
         for column, mode in enumerate(
@@ -300,41 +453,41 @@ class ExtractorApp:
         ):
             self._build_mode_card(modes, mode, column)
 
-        estimate = self._card(outer, padx=18, pady=10)
-        estimate.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        estimate = self._card(outer, padx=18, pady=11)
+        estimate.grid(row=5, column=0, sticky="ew", pady=(0, 9))
         estimate.columnconfigure(1, weight=1)
         tk.Label(
             estimate,
             text="SPACE",
             background=COLORS["surface"],
-            foreground=COLORS["accent"],
-            font=("Segoe UI", 8, "bold"),
+            foreground=COLORS["gold"],
+            font=(self.ui_family, 8, "bold"),
         ).grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 18))
         tk.Label(
             estimate,
             textvariable=self.size_title_var,
             background=COLORS["surface"],
             foreground=COLORS["text"],
-            font=("Segoe UI Semibold", 11),
+            font=(self.ui_family, 11, "bold"),
         ).grid(row=0, column=1, sticky="w")
         self.size_detail = tk.Label(
             estimate,
             textvariable=self.size_detail_var,
             background=COLORS["surface"],
             foreground=COLORS["muted"],
-            font=("Segoe UI", 9),
+            font=(self.ui_family, 9),
         )
         self.size_detail.grid(row=1, column=1, sticky="w", pady=(2, 0))
 
         activity = tk.Frame(outer, background=COLORS["window"])
-        activity.grid(row=5, column=0, sticky="ew")
+        activity.grid(row=6, column=0, sticky="ew")
         activity.columnconfigure(0, weight=1)
         self.status_label = tk.Label(
             activity,
             textvariable=self.status_var,
             background=COLORS["window"],
             foreground=COLORS["muted"],
-            font=("Segoe UI", 9),
+            font=(self.ui_family, 9),
         )
         self.status_label.grid(row=0, column=0, sticky="w")
         self.details_button = tk.Button(
@@ -344,19 +497,39 @@ class ExtractorApp:
             background=COLORS["window"],
             foreground=COLORS["muted"],
             activebackground=COLORS["window"],
-            activeforeground=COLORS["text"],
+            activeforeground=COLORS["gold"],
             relief="flat",
             borderwidth=0,
             cursor="hand2",
-            font=("Segoe UI", 9, "underline"),
+            font=(self.ui_family, 9, "underline"),
         )
         self.details_button.grid(row=0, column=1, sticky="e")
-        self.progress = ttk.Progressbar(activity, mode="indeterminate", style="Gold.Horizontal.TProgressbar")
+        self.progress = ttk.Progressbar(
+            activity, mode="determinate", maximum=100, style="Gold.Horizontal.TProgressbar"
+        )
         self.progress.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(7, 0))
 
+        self._build_log_window()
+
+        actions = tk.Frame(outer, background=COLORS["window"])
+        actions.grid(row=8, column=0, sticky="ew", pady=(14, 0))
+        actions.columnconfigure(0, weight=1)
+        self.open_button = ttk.Button(
+            actions, text="Open output folder", style="Secondary.TButton", command=self._open_output
+        )
+        self.open_button.grid(row=0, column=0, sticky="w")
+        ttk.Button(actions, text="Close", style="Secondary.TButton", command=self._close).grid(
+            row=0, column=1, padx=(0, 10)
+        )
+        self.extract_button = ttk.Button(
+            actions, text="Extract art", style="Primary.TButton", command=self._start_extract
+        )
+        self.extract_button.grid(row=0, column=2)
+
+    def _build_log_window(self) -> None:
         self.log_window = tk.Toplevel(self.root)
         self.log_window.title("Extraction details")
-        self.log_window.geometry("780x360")
+        self.log_window.geometry("820x380")
         self.log_window.minsize(560, 260)
         self.log_window.configure(background=COLORS["window"])
         self.log_window.protocol("WM_DELETE_WINDOW", self._hide_details)
@@ -366,57 +539,36 @@ class ExtractorApp:
             text="Extraction details",
             background=COLORS["window"],
             foreground=COLORS["text"],
-            font=("Segoe UI Semibold", 13),
+            font=(self.head_family, 14),
         ).pack(anchor="w", padx=18, pady=(15, 8))
-        self.log_frame = tk.Frame(
+        frame = tk.Frame(
             self.log_window,
             background=COLORS["surface"],
             highlightbackground=COLORS["border"],
             highlightthickness=1,
         )
-        self.log_frame.pack(fill="both", expand=True, padx=18, pady=(0, 18))
-        self.log_frame.rowconfigure(0, weight=1)
-        self.log_frame.columnconfigure(0, weight=1)
+        frame.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
         self.log = tk.Text(
-            self.log_frame,
+            frame,
             height=7,
             wrap="word",
             state="disabled",
             background=COLORS["input"],
             foreground=COLORS["muted"],
-            insertbackground=COLORS["text"],
-            selectbackground=COLORS["border"],
+            insertbackground=COLORS["gold"],
+            selectbackground=COLORS["surface_selected"],
             relief="flat",
             borderwidth=0,
             padx=12,
             pady=10,
-            font=("Cascadia Mono", 9),
+            font=(self.mono_family, 9),
         )
         self.log.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(self.log_frame, orient="vertical", command=self.log.yview)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.log.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=scrollbar.set)
-
-        actions = tk.Frame(outer, background=COLORS["window"])
-        actions.grid(row=7, column=0, sticky="ew", pady=(12, 0))
-        actions.columnconfigure(0, weight=1)
-        self.open_button = ttk.Button(
-            actions,
-            text="Open output folder",
-            style="Secondary.TButton",
-            command=self._open_output,
-        )
-        self.open_button.grid(row=0, column=0, sticky="w")
-        ttk.Button(actions, text="Close", style="Secondary.TButton", command=self._close).grid(
-            row=0, column=1, padx=(0, 10)
-        )
-        self.extract_button = ttk.Button(
-            actions,
-            text="Extract art",
-            style="Primary.TButton",
-            command=self._start_extract,
-        )
-        self.extract_button.grid(row=0, column=2)
 
     def _card(self, parent: tk.Widget, *, padx: int = 18, pady: int = 16) -> tk.Frame:
         return tk.Frame(
@@ -434,14 +586,14 @@ class ExtractorApp:
             text=title,
             background=COLORS["surface"],
             foreground=COLORS["text"],
-            font=("Segoe UI Semibold", 12),
+            font=(self.head_family, 13),
         ).grid(row=row, column=0, sticky="w")
         tk.Label(
             parent,
             text=subtitle,
             background=COLORS["surface"],
             foreground=COLORS["muted"],
-            font=("Segoe UI", 9),
+            font=(self.ui_family, 9),
         ).grid(row=row, column=1, columnspan=2, sticky="w")
 
     def _build_mode_card(self, parent: tk.Widget, mode: ExtractionMode, column: int) -> None:
@@ -452,7 +604,7 @@ class ExtractorApp:
             highlightbackground=COLORS["border"],
             highlightthickness=1,
             padx=15,
-            pady=11,
+            pady=12,
             cursor="hand2",
         )
         card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 5, 0 if column == 2 else 5))
@@ -472,20 +624,21 @@ class ExtractorApp:
             background=COLORS["surface"],
             foreground=COLORS["text"],
             activebackground=COLORS["surface"],
-            activeforeground=COLORS["text"],
-            selectcolor=COLORS["surface_alt"],
-            font=("Segoe UI Semibold", 11),
+            activeforeground=COLORS["gold_lit"],
+            selectcolor=COLORS["input"],
+            font=(self.ui_family, 11, "bold"),
             cursor="hand2",
             anchor="w",
         )
         radio.grid(row=0, column=0, sticky="w")
         widgets.append(radio)
+        self.mode_radios[mode] = radio
         badge = tk.Label(
             top,
             text=content["badge"],
             background=COLORS["surface_alt"],
-            foreground=COLORS["accent"] if mode is ExtractionMode.RELEVANT_ART else COLORS["faint"],
-            font=("Segoe UI", 7, "bold"),
+            foreground=COLORS["gold"] if mode is ExtractionMode.RELEVANT_ART else COLORS["faint"],
+            font=(self.ui_family, 7, "bold"),
             padx=7,
             pady=3,
             cursor="hand2",
@@ -493,11 +646,11 @@ class ExtractorApp:
         badge.grid(row=0, column=1, sticky="e")
         widgets.append(badge)
 
-        for row, (text, color, font) in enumerate(
+        for row, (text, color, font_spec) in enumerate(
             (
-                (content["summary"], COLORS["text"], ("Segoe UI", 9, "bold")),
-                (content["includes"], COLORS["accent"], ("Segoe UI", 8)),
-                (content["detail"], COLORS["muted"], ("Segoe UI", 8)),
+                (content["summary"], COLORS["text"], (self.ui_family, 9, "bold")),
+                (content["includes"], COLORS["gold"], (self.ui_family, 8)),
+                (content["detail"], COLORS["muted"], (self.ui_family, 8)),
             ),
             start=1,
         ):
@@ -509,7 +662,7 @@ class ExtractorApp:
                 justify="left",
                 anchor="nw",
                 wraplength=250,
-                font=font,
+                font=font_spec,
                 cursor="hand2",
             )
             label.grid(row=row, column=0, sticky="ew", pady=(6 if row == 1 else 4, 0))
@@ -529,7 +682,10 @@ class ExtractorApp:
         for mode, (card, widgets) in self.mode_cards.items():
             active = mode is selected
             background = COLORS["surface_selected"] if active else COLORS["surface"]
-            card.configure(background=background, highlightbackground=COLORS["accent"] if active else COLORS["border"])
+            card.configure(
+                background=background,
+                highlightbackground=COLORS["gold"] if active else COLORS["border"],
+            )
             for widget in widgets:
                 if isinstance(widget, (tk.Frame, tk.Label, tk.Radiobutton)):
                     try:
@@ -539,6 +695,8 @@ class ExtractorApp:
                 if isinstance(widget, tk.Radiobutton):
                     widget.configure(activebackground=background)
         self.refresh_estimate()
+
+    # --------------------------------------------------------------- actions
 
     def _choose_game(self) -> None:
         chosen = filedialog.askdirectory(
@@ -604,15 +762,16 @@ class ExtractorApp:
         if output.exists() and any(output.iterdir()):
             if not messagebox.askyesno(
                 "Replace the existing extraction?",
-                f"The current contents of this extraction folder will be replaced:\n\n{output}\n\nContinue?",
+                "Everything in this folder will be deleted and rebuilt:\n\n"
+                f"{output}\n\nContinue?",
             ):
                 return
 
         self.running = True
         self._set_inputs_enabled(False)
-        self.progress.start(11)
-        self.status_var.set("Extracting and source-verifying your art library…")
-        self.status_label.configure(foreground=COLORS["accent"])
+        self.progress.configure(value=0)
+        self.status_var.set("Preparing…")
+        self.status_label.configure(foreground=COLORS["gold"])
         self._append_log("\n— Starting extraction —\n")
         mode = ExtractionMode(self.mode_var.get())
         threading.Thread(target=self._extract_worker, args=(game, output, mode), daemon=True).start()
@@ -624,6 +783,11 @@ class ExtractorApp:
         self.output_entry.configure(state=state)
         self.game_button.configure(state=state)
         self.output_button.configure(state=state)
+        # The cards guard themselves through self.running, but the radio
+        # buttons are real widgets and would otherwise still accept clicks and
+        # show a selection that does not match the run in progress.
+        for radio in self.mode_radios.values():
+            radio.configure(state=state)
 
     def _extract_worker(self, game: Path, output: Path, mode: ExtractionMode) -> None:
         writer = QueueWriter(self.messages)
@@ -634,24 +798,36 @@ class ExtractorApp:
         except Exception as exc:  # GUI boundary: report errors instead of disappearing.
             self.messages.put(("error", str(exc)))
 
+    def _advance_progress(self, text: str) -> None:
+        for marker, percent in PROGRESS_STAGES:
+            if marker in text:
+                if percent > self.progress["value"]:
+                    self.progress.configure(value=percent)
+                self.status_var.set(text.strip().rstrip(".") or "Working…")
+                break
+
     def _poll_messages(self) -> None:
         try:
             while True:
                 kind, payload = self.messages.get_nowait()
                 if kind == "log":
                     self._append_log(str(payload))
+                    self._advance_progress(str(payload))
                 elif kind == "done":
                     total, output = payload
                     self._finish()
+                    self.progress.configure(value=100)
                     self.status_var.set(f"Complete · {total:,} PNG files · source-pixel audit passed")
                     self.status_label.configure(foreground=COLORS["success"])
                     if messagebox.askyesno(
                         "Your art library is ready",
-                        f"Created {total:,} PNG files and verified them against the source archives.\n\n{output}\n\nOpen the folder now?",
+                        f"Created {total:,} PNG files and verified them against the source archives.\n\n"
+                        f"{output}\n\nOpen the folder now?",
                     ):
                         self._open_path(Path(output))
                 elif kind == "error":
                     self._finish()
+                    self.progress.configure(value=0)
                     self.status_var.set("Extraction stopped · see the error for details")
                     self.status_label.configure(foreground=COLORS["error"])
                     messagebox.showerror("Extraction could not be completed", str(payload))
@@ -661,13 +837,11 @@ class ExtractorApp:
 
     def _finish(self) -> None:
         self.running = False
-        self.progress.stop()
         self._set_inputs_enabled(True)
         self.refresh_estimate()
 
     def _toggle_details(self) -> None:
         if self.log_window.state() == "withdrawn":
-            self.details_visible = True
             self.log_window.deiconify()
             self.log_window.lift()
             self.log_window.focus_set()
@@ -676,7 +850,6 @@ class ExtractorApp:
             self._hide_details()
 
     def _hide_details(self) -> None:
-        self.details_visible = False
         self.log_window.withdraw()
         self.details_button_var.set("Show technical details")
 
@@ -689,7 +862,7 @@ class ExtractorApp:
 
     def _open_path(self, path: Path) -> None:
         try:
-            os.startfile(path)  # type: ignore[attr-defined]
+            os.startfile(path)  # noqa: S606  -- Windows-only tool, matching the game
         except OSError as exc:
             messagebox.showerror("Could not open folder", str(exc))
 
@@ -709,6 +882,7 @@ class ExtractorApp:
 
 
 def main() -> int:
+    enable_dpi_awareness()
     root = tk.Tk()
     ExtractorApp(root)
     root.mainloop()

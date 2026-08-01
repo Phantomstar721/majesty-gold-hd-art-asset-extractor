@@ -91,10 +91,14 @@ Useful options:
 .\.venv\Scripts\python scripts\extract_assets.py --mode relevant-raw
 .\.venv\Scripts\python scripts\extract_assets.py --mode all-raw
 .\.venv\Scripts\python scripts\extract_assets.py --limit 5
+.\.venv\Scripts\python scripts\extract_assets.py --yes
 .\run_extractor.cmd --zip
 ```
 
 `--full` remains as a backwards-compatible alias for `--mode all-raw`.
+`--yes` skips the confirmation shown before an existing output folder is
+cleared. `--limit` is a quick sample: it stops early, so it skips presentation
+art and the source-pixel audit, and it tells you so.
 
 The default run is curated. It exports profile art, icons, representative
 hero/monster/building/lair sprites, spell effects, presentation art, `_previews/`,
@@ -113,17 +117,36 @@ them at runtime, so the extractor adds that theme to those two MP4s and trims
 it at the end of the video. Raw modes still preserve the untouched `.bik`
 files, including their original audio-stream layout.
 
-Generated output goes under `output/` by default and is gitignored. The GUI asks
-before replacing a non-empty output folder. The command-line extractor clears
-the selected output folder each run. Both refuse obvious unsafe targets such as
-the game folder or repo root.
+### The output folder is emptied
 
-Every normal extraction now finishes with a source-pixel occupancy audit. For
-each TILE-derived PNG, it independently counts pixels encoded in the archive's
-v3 RLE runs or v1 raster and verifies the PNG alpha count after only the
-category's documented transparency/control rules. Extraction fails loudly if
-the renderer drops a stored value—including an explicit palette-index-zero
-pixel—or invents an opaque pixel.
+Generated output goes under `output/` by default and is gitignored.
+
+**Everything in the output folder is deleted at the start of every run.** Three
+separate checks stand in front of that:
+
+- Drive roots, Windows system folders, and profile folders such as Documents,
+  Desktop and Downloads are refused outright.
+- The game installation is refused, along with anything inside it and any
+  folder that contains it.
+- An existing folder is only cleared when it carries this tool's marker file,
+  written by a previous run. **A folder holding your own files is refused**
+  rather than emptied, so a mistyped path cannot cost you anything.
+
+The GUI asks before replacing a non-empty folder. The command line asks too,
+listing what would be removed; pass `--yes` to skip the prompt in a script.
+
+### Source-pixel audit
+
+A full extraction finishes with a source-pixel occupancy audit. For each
+TILE-derived PNG it independently counts the pixels encoded in the archive's v3
+RLE runs or v1 raster, then checks the PNG's alpha count against it. Extraction
+fails loudly if the renderer drops a stored value, including an explicit
+palette-index-zero pixel, or invents an opaque pixel.
+
+Two honest limits. The audit applies the same transparency rules the renderer
+does, so it proves the renderer is faithful to those rules rather than proving
+the rules are right; it catches dropped and invented pixels, not a wrong policy.
+And `--limit` runs stop before it, which they now say out loud.
 
 `--zip` creates a local zip next to the output folder. Keep that zip private
 unless you have permission to redistribute the extracted assets.
@@ -177,7 +200,22 @@ Those are skipped during normal extraction instead of being mixed into the
 human-readable `buildings/sprites/` folders. Use `--mode all-raw` to keep those records
 under `other/main/`.
 
-## TILE format / AI re-art
+## Tests
+
+The decoders, the output-folder guard and the category routing have unit tests
+that need neither the game nor a network:
+
+```powershell
+.\.venv\Scripts\python -m unittest discover -s tests
+```
+
+## Scope: this tool only reads
+
+The extractor reads your installation and writes PNGs. It does not write to the
+game, encode TILEs, or patch CAM archives, and it depends on no other
+repository. Cloning this one is enough to run everything in it.
+
+## TILE format
 
 TILE v3 RLE stores each opaque run's **exclusive end** column (not start). Its
 packed run word uses eleven low count bits and upper flag bits, allowing wide
@@ -194,14 +232,22 @@ for a legacy transparent-index collision: only pixels connected to the image
 edge remain transparent, while enclosed artwork pixels are restored. Indexed,
 full-background profile portraits are decoded as opaque full-palette paintings
 rather than applying sprite shadow/control-index removal to their facial colors.
-See:
 
-- [docs/TILE_V3_RLE_ROOT_CAUSE.md](docs/TILE_V3_RLE_ROOT_CAUSE.md)
-- [docs/AI_SPRITE_REART_WORKFLOW.md](docs/AI_SPRITE_REART_WORKFLOW.md)
+16-bit RGB565 art has no alpha channel and no transparent-index field, so
+`0x0000` is ambiguous: pure black in a background, or the cutout in a sprite
+layer. It is resolved by output category. Backgrounds keep their black; sprite
+layers keep their silhouette. Reading it as transparent everywhere punched
+17,801 holes through the main menu backdrop while leaving the pixels one step
+off black untouched.
 
-Helpers:
+See [docs/TILE_V3_RLE_ROOT_CAUSE.md](docs/TILE_V3_RLE_ROOT_CAUSE.md).
+
+### Sprite sheet export
+
+One animation of one unit, laid out a direction per row and aligned on the
+hotspots stored in the archive, with a JSON manifest naming the source tile
+behind every cell:
 
 ```powershell
-python scripts/export_sprite_sheet.py --record AVB1 --set Stand --out output/reart/AVB1_Stand
-python scripts/import_sprite_sheet.py --sheet-json output/reart/AVB1_Stand/AVB1Barbarian_Stand_sheet.json --out-tiles output/reart/AVB1_Stand/tiles
+.\.venv\Scripts\python scripts\export_sprite_sheet.py --record AVB1 --set Stand --out output\sheets\AVB1_Stand
 ```
