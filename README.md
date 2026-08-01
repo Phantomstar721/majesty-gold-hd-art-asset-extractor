@@ -42,10 +42,11 @@ virtual environment and opens the extractor window:
 .\run_extractor.cmd
 ```
 
-The window auto-detects Majesty Gold HD, lets you choose an output folder and
-one of three extraction modes, shows a conservative space estimate and free
-disk space, and keeps a live progress log. The default output is
-`output\assets` beside the tool.
+The modern lightweight window auto-detects Majesty Gold HD, presents the three
+modes as detailed cards, and shows a conservative output estimate alongside
+free disk space. Progress and source-audit status stay visible while the
+technical log opens separately on demand. The default output is `output\assets`
+beside the tool.
 
 ### Extraction modes
 
