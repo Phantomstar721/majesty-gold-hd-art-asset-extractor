@@ -649,6 +649,50 @@ class ProgressWordingTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"mode cards exposing internals: {offenders}")
 
 
+class NoConsoleFlashTests(unittest.TestCase):
+    """Child processes must not pop a console window.
+
+    A packaged build is a GUI app with no console, so Windows gives every child
+    a new one. An extraction runs FFmpeg about forty times, which appeared as a
+    stream of command prompts flashing over the window.
+    """
+
+    def test_ffmpeg_runner_suppresses_the_window(self):
+        source = (SCRIPTS / "ffmpeg_support.py").read_text(encoding="utf-8")
+        self.assertIn("CREATE_NO_WINDOW", source)
+        self.assertIn("STARTF_USESHOWWINDOW", source)
+        self.assertIn("SW_HIDE", source)
+
+    def test_nothing_calls_subprocess_directly(self):
+        """Every launch goes through ffmpeg_support.run, which hides the window."""
+        offenders = []
+        for path in SCRIPTS.glob("*.py"):
+            if path.name == "ffmpeg_support.py":
+                continue  # the one place allowed to call subprocess
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "subprocess"
+                ):
+                    offenders.append(f"{path.name}:{node.lineno} subprocess.{func.attr}")
+        self.assertEqual(
+            offenders,
+            [],
+            "these would flash a console window; use ffmpeg_support.run: " + ", ".join(offenders),
+        )
+
+    def test_the_runner_actually_works(self):
+        """Guard flags must not break the call itself."""
+        result = ffmpeg_support.run([sys.executable, "-c", "print('hello')"])
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.decode().strip(), "hello")
+
+
 class FFmpegSupportTests(unittest.TestCase):
     def test_nothing_is_downloaded_unless_asked(self):
         self.assertIsNone(

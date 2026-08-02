@@ -8,7 +8,6 @@ from pathlib import Path
 import re
 import shutil
 import struct
-import subprocess
 import sys
 import tempfile
 import time
@@ -1447,7 +1446,7 @@ def decode_bink_samples(data: bytes, ffmpeg: Path) -> list[tuple[int, Image.Imag
             "-pix_fmt", "rgba",
             "-",
         ]
-        result = subprocess.run(command, capture_output=True, check=False)
+        result = ffmpeg_support.run(command)
         if result.returncode != 0:
             message = result.stderr.decode("utf-8", "replace").strip()
             raise RuntimeError(f"Could not decode Bink presentation art: {message}")
@@ -1521,9 +1520,10 @@ def transcode_bink_video(
             # when the video ends, matching the lifetime of the in-game view.
             command.append("-shortest")
         command.append(str(output_path))
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = ffmpeg_support.run(command)
         if result.returncode != 0:
-            raise RuntimeError(f"Could not convert Bink cinematic: {result.stderr.strip()}")
+            message = result.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(f"Could not convert Bink cinematic: {message}")
 
 
 def make_presentation_contact_sheet(frames: list[tuple[int, Image.Image]]) -> Image.Image:

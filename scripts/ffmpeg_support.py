@@ -15,9 +15,10 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 
 from app_paths import tool_root
 
@@ -37,6 +38,27 @@ FFMPEG_APPROX_MB = 30
 
 class FFmpegUnavailable(RuntimeError):
     """Raised when cinematics were asked for but FFmpeg could not be provided."""
+
+
+def run(command: Sequence[str]) -> subprocess.CompletedProcess:
+    """Run FFmpeg without a console window appearing.
+
+    A packaged build is a GUI application with no console of its own, so every
+    child process Windows starts gets a fresh one. An extraction launches
+    FFmpeg around forty times, once per Bink record plus once per cinematic,
+    which showed up as a stream of command prompts flashing over the window.
+
+    CREATE_NO_WINDOW suppresses that. STARTF_USESHOWWINDOW is set as well, for
+    the console builds where the flag alone is not enough.
+    """
+    keywords: dict[str, object] = {}
+    if os.name == "nt":
+        keywords["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+        keywords["startupinfo"] = startup
+    return subprocess.run(list(command), capture_output=True, check=False, **keywords)
 
 
 def find_ffmpeg() -> Path | None:
