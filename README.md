@@ -238,7 +238,7 @@ sprite layers keep their silhouette.
 See [docs/TILE_V3_RLE_ROOT_CAUSE.md](docs/TILE_V3_RLE_ROOT_CAUSE.md) for the
 evidence behind the exclusive-end reading.
 
-## Licence
+## License
 
 MIT, for the tooling. See [LICENSE](LICENSE). It grants nothing over Majesty
 Gold HD or its assets, which belong to their respective owners.

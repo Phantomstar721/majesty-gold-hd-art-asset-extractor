@@ -22,10 +22,10 @@ SOFTWARE.
 
 ---
 
-This licence covers the extractor tooling in this repository only.
+This license covers the extractor tooling in this repository only.
 
 It does not grant any rights to Majesty Gold HD or its assets. Majesty Gold HD
 is the property of its respective owners. This tool reads a copy of the game
 that you already own and writes output to your own machine. No game content is
-included in or distributed with this repository, and extracted output should
-not be redistributed.
+included in or distributed with this repository. Extracted game content is not
+covered by this license and is not yours to redistribute.
