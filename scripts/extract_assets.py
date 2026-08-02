@@ -191,12 +191,16 @@ INTERFACE_CAM_SOURCES = [
     ("downloadable_quest_interface", Path("DataMX/XQD1_intro.cam")),
 ]
 
+# These hold PICT records only, and every one of them is a QM quest-map movie,
+# an MV cinematic, or an SPLH loading screen. Despite the folder names, no
+# segue art lives here; segues are ordinary interface records listed in
+# CURATED_INTERFACE_RECORDS and need no video decoding.
 PICTURE_CAM_SOURCES = [
-    # cinedata1 contains the base intro and QM00-QM18 quest-map/segue movies.
+    # cinedata1 holds the base intro and the QM00-QM18 quest-map movies.
     ("base_presentation", Path("Data/cinedata1.cam")),
     # cinedata3 is the higher-resolution variant of base movies/loading art.
     ("base_presentation_hd", Path("Data/cinedata3.dat")),
-    # Expansion maps/segues, movie, and loading screen.
+    # Expansion quest maps, movie, and loading screen.
     ("expansion_presentation", Path("DataMX/mx_cinedata1.cam")),
     ("expansion_presentation_hd", Path("DataMX/mx_cinedata3.dat")),
 ]
@@ -1555,20 +1559,22 @@ def export_presentation_art(
     keep_original_video: bool = False,
     ffmpeg: Path | None = None,
 ) -> int:
-    """Export loading screens, and, when FFmpeg is available, video records.
+    """Export the PICT records: loading screens, and the Bink video ones.
 
-    Loading screens are a plain 15-bit raster this tool decodes itself. Maps,
-    segues and cinematics are Bink, so without FFmpeg they are skipped rather
-    than failing the run.
+    Only two categories here are video. Cinematics and quest maps are Bink
+    streams and need FFmpeg; without it they are skipped rather than failing
+    the run. Loading screens are a plain 15-bit raster this tool decodes
+    itself. Segues and interface maps do not come through here at all, they are
+    ordinary interface records, so they are unaffected either way.
     """
     written = 0
     if ffmpeg is None:
         print(
-            "Extracting loading screens (cinematics, maps and segues need FFmpeg)...",
+            "Extracting loading screens (cinematics and quest maps need FFmpeg)...",
             flush=True,
         )
     else:
-        print("Extracting maps, cinematics, segues, and loading screens...", flush=True)
+        print("Extracting quest maps, cinematics, and loading screens...", flush=True)
     for source_label, rel_path in PICTURE_CAM_SOURCES:
         path = game / rel_path
         if not path.exists():
@@ -2466,8 +2472,9 @@ def main() -> int:
         "--cinematics",
         action="store_true",
         help=(
-            "Include cinematics, maps and segues. These are Bink video and need "
-            "FFmpeg; if none is found you will be offered a download."
+            "Include cinematics and quest maps. These are Bink video and need "
+            "FFmpeg; if none is found you will be offered a download. Every "
+            "other category extracts without it."
         ),
     )
     args = parser.parse_args()

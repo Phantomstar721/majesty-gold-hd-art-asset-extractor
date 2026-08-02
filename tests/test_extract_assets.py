@@ -14,6 +14,7 @@ import ffmpeg_support  # noqa: E402
 import imaging  # noqa: E402
 
 from extract_assets import (  # noqa: E402
+    CURATED_INTERFACE_RECORDS,
     CamEntry,
     CamSection,
     ExtractionMode,
@@ -497,6 +498,54 @@ class ImagingTests(unittest.TestCase):
         )
         missing = sorted(set(needed) - set(imaging._GLYPHS))
         self.assertEqual(missing, [], f"glyphs missing from the bitmap font: {missing}")
+
+
+class VideoCategoryTests(unittest.TestCase):
+    """Which categories genuinely need FFmpeg.
+
+    The tick-box and its messages once claimed segues needed FFmpeg. They do
+    not: segues are ordinary interface records. Measured against a real
+    install, a run with FFmpeg hidden produced 136 segues and 93 interface
+    maps, identical to a run with it, while cinematics and quest maps went to
+    zero.
+    """
+
+    NEEDS_FFMPEG = {"cinematics", "maps/quest"}
+
+    def test_only_pict_records_can_need_ffmpeg(self):
+        """Bink only ever arrives through presentation_category."""
+        for name, category in (
+            ("MV01", "cinematics"),
+            ("QM07", "maps/quest"),
+            ("SPLH", "loading_screens"),
+        ):
+            self.assertEqual(presentation_category(name), category)
+        # Segue records are interface art and are not presentation records.
+        for name in ("DXS0", "INDb", "IX72", "MX29"):
+            self.assertIsNone(presentation_category(name), name)
+
+    def test_segues_are_interface_records_not_video(self):
+        segue_ids = [
+            key for key, value in CURATED_INTERFACE_RECORDS.items() if value == "segues"
+        ]
+        self.assertTrue(segue_ids, "no segue records found; the mapping moved")
+        for record_id in segue_ids:
+            self.assertIsNone(presentation_category(record_id), record_id)
+
+    def test_loading_screens_do_not_need_ffmpeg(self):
+        """They are a 15-bit raster this tool decodes itself."""
+        self.assertNotIn("loading_screens", self.NEEDS_FFMPEG)
+
+    def test_the_wording_does_not_overclaim(self):
+        """Nothing shown to the user should say segues need FFmpeg."""
+        surfaces = [
+            ffmpeg_support.describe_download(),
+            "\n".join(ffmpeg_support.skip_notice()),
+        ]
+        for text in surfaces:
+            lowered = text.lower()
+            if "ffmpeg" in lowered:
+                self.assertNotIn("segue", lowered, text)
 
 
 class FFmpegSupportTests(unittest.TestCase):

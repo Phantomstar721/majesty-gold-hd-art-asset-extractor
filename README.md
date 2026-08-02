@@ -44,12 +44,14 @@ Manager where available and the official download page otherwise. Once Python
 is there the window never appears again. The extractor cannot present this
 itself, having no Python to run on.
 
-The one exception is **cinematics**. The game stores them as Bink video, a
-proprietary codec with no pure-Python decoder, so they need FFmpeg. That is a
-tick-box in the window, off by default unless FFmpeg is already on your
-machine. Tick it and, if you don't have FFmpeg, you are shown exactly what
-would be downloaded and from where before anything happens. Leave it off and
-everything else still extracts.
+The one exception is **Bink video**, which the game uses for two categories:
+`cinematics` and the animated `maps/quest`. Bink is proprietary with no
+pure-Python decoder, so those need FFmpeg. Everything else, segues and
+interface maps included, extracts without it.
+
+That is a tick-box in the window, off by default unless FFmpeg is already on
+your machine. Tick it and, if you don't have FFmpeg, you are shown exactly what
+would be downloaded and from where before anything happens.
 
 The modern lightweight window auto-detects Majesty Gold HD, presents the three
 modes as detailed cards, and shows a conservative output estimate alongside
@@ -239,11 +241,19 @@ as bytes beats several hundred thousand per-pixel calls, so decoding and
 writing the 768x520 main menu backdrop takes 0.24s against Pillow's 0.45s, and
 the exported art is about 15% smaller for pixel-identical images.
 
-Cinematics are the exception. Bink is proprietary and cannot be decoded in pure
-Python, so those records need FFmpeg. An FFmpeg already on your PATH, or named
-by `MAJESTY_FFMPEG`, is used automatically. Otherwise the tool offers to fetch
-one, naming the source and verifying the publisher's SHA-256 before it is
-unpacked, and takes no for an answer: the rest of the extraction is unaffected.
+Bink video is the exception. It is proprietary and cannot be decoded in pure
+Python, so those records need FFmpeg. Exactly two categories are affected:
+
+| Category | Without FFmpeg |
+| --- | --- |
+| `cinematics` | skipped |
+| `maps/quest` | skipped |
+| `segues`, `maps/interface`, everything else | extracted normally |
+
+An FFmpeg already on your PATH, or named by `MAJESTY_FFMPEG`, is used
+automatically. Otherwise the tool offers to fetch one, naming the source and
+verifying the publisher's SHA-256 before it is unpacked, and takes no for an
+answer. A run without it still passes the source-pixel audit.
 
 ## TILE format
 

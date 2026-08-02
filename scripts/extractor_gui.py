@@ -59,7 +59,7 @@ MODE_CONTENT = {
         "title": "Clean relevant art",
         "badge": "RECOMMENDED",
         "summary": "The complete, presentation-ready art library.",
-        "includes": "Sprites · profiles · icons · effects · menus · maps · segues · loading art · audible MP4 cinematics",
+        "includes": "Sprites · profiles · icons · effects · menus · interface maps · segues · loading art",
         "detail": (
             "Only documented world-sprite controls are removed. Profiles, icons, "
             "effects, and UI art keep full palettes. TILE PNGs are source-audited."
@@ -69,7 +69,7 @@ MODE_CONTENT = {
         "title": "Relevant art — raw",
         "badge": "CURATED SOURCE",
         "summary": "The useful library with game-control colors intact.",
-        "includes": "Same curated art and MP4s as clean mode · plus original BIK videos",
+        "includes": "Same curated art as clean mode · plus original BIK video when cinematics are on",
         "detail": (
             "Keeps sprite shadow, blend, and transition pixels visible. Filters out "
             "noisy support sets and unrelated archive records."
@@ -79,7 +79,7 @@ MODE_CONTENT = {
         "title": "Everything — raw",
         "badge": "ARCHIVAL",
         "summary": "Every recognized art record and animation frame.",
-        "includes": "All curated art · every sprite frame · support layers · uncategorized records · MP4 and BIK video",
+        "includes": "All curated art · every sprite frame · support layers · uncategorized records",
         "detail": (
             "Largest and slowest. No relevance filtering or cleanup; includes "
             "near-duplicate frames and engine-only layers."
@@ -444,7 +444,7 @@ class ExtractorApp:
         ).pack(side="left")
         tk.Label(
             mode_header,
-            text="All three include menus, maps, loading art, segues, and playable cinematics.",
+            text="All three include menus, interface maps, loading art and segues.",
             background=COLORS["window"],
             foreground=COLORS["faint"],
             font=(self.ui_family, 9),
@@ -537,9 +537,11 @@ class ExtractorApp:
     def _build_cinematics_card(self, outer: tk.Widget) -> None:
         """Opt-in for the one thing that cannot be done with the standard library.
 
-        Cinematics, quest maps and segues are Bink video. Everything else here
-        runs with nothing installed, so this stays a deliberate choice rather
-        than a silent download.
+        Only two categories are Bink video: cinematics and quest maps. Segues
+        and interface maps are ordinary interface records and extract without
+        FFmpeg, so they are not named here. Everything else runs with nothing
+        installed, which is why this stays a deliberate choice rather than a
+        silent download.
         """
         card = self._card(outer, padx=18, pady=11)
         card.grid(row=6, column=0, sticky="ew", pady=(0, 9))
@@ -547,7 +549,7 @@ class ExtractorApp:
 
         self.cinematics_check = tk.Checkbutton(
             card,
-            text="Include cinematics, quest maps and segues",
+            text="Include cinematics and quest map animations",
             variable=self.cinematics_var,
             command=self._cinematics_changed,
             background=COLORS["surface"],
@@ -576,8 +578,8 @@ class ExtractorApp:
         found = ffmpeg_support.find_ffmpeg()
         if not self.cinematics_var.get():
             self.cinematics_detail_var.set(
-                "Left off, the extractor needs nothing installed at all. "
-                "These records are Bink video and will be skipped."
+                "Left off, the extractor needs nothing installed at all. Only these "
+                "two are Bink video; every other category still extracts."
             )
             self.cinematics_detail.configure(foreground=COLORS["muted"])
         elif found is not None:
@@ -838,8 +840,9 @@ class ExtractorApp:
         if ffmpeg is None and self.cinematics_var.get():
             if not messagebox.askyesno(
                 "Continue without cinematics?",
-                "Cinematics, quest maps and segues will be skipped.\n\n"
-                "Everything else extracts normally. Continue?",
+                "Cinematics and quest map animations will be skipped.\n\n"
+                "Every other category, including segues and interface maps, "
+                "extracts normally. Continue?",
             ):
                 return
 

@@ -58,7 +58,8 @@ def find_ffmpeg() -> Path | None:
 
 def describe_download() -> str:
     return (
-        f"Cinematics need FFmpeg, which is not part of this tool.\n\n"
+        f"Cinematics and quest maps are Bink video and need FFmpeg, "
+        f"which is not part of this tool.\n\n"
         f"It would be downloaded from:\n  {FFMPEG_URL}\n\n"
         f"About {FFMPEG_APPROX_MB} MB, verified against the publisher's SHA-256, "
         f"and unpacked to:\n  {FFMPEG_DIR}\n\n"
@@ -158,8 +159,9 @@ def resolve_ffmpeg(
 
 def skip_notice() -> Iterable[str]:
     return (
-        "Cinematics were skipped: FFmpeg is not available.",
-        "  They are the only part of the game this tool cannot read on its own.",
+        "Cinematics and quest maps were skipped: FFmpeg is not available.",
+        "  Those two are Bink video, the only part of the game this tool cannot",
+        "  read on its own. Everything else was extracted normally.",
         "  Install FFmpeg, put it on PATH, set MAJESTY_FFMPEG to its location,",
         "  or re-run with --cinematics to be offered a download.",
     )
