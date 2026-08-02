@@ -1,3 +1,4 @@
+import ast
 import os
 from pathlib import Path
 import struct
@@ -546,6 +547,78 @@ class VideoCategoryTests(unittest.TestCase):
             lowered = text.lower()
             if "ffmpeg" in lowered:
                 self.assertNotIn("segue", lowered, text)
+
+
+class ProgressWordingTests(unittest.TestCase):
+    """The window's progress markers are matched against the extractor's output.
+
+    That coupling is invisible: reword a print() and the bar silently stops
+    advancing. It already happened once, when "Extracting maps, cinematics"
+    stopped matching after the message was corrected.
+    """
+
+    @staticmethod
+    def _gui():
+        import extractor_gui  # noqa: PLC0415 -- needs tkinter, so import late
+
+        return extractor_gui
+
+    @staticmethod
+    def _printed_strings() -> list[str]:
+        source = (SCRIPTS / "extract_assets.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        found: list[str] = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "print"):
+                continue
+            for argument in node.args:
+                # Plain literals and the literal halves of f-strings.
+                if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                    found.append(argument.value)
+                elif isinstance(argument, ast.JoinedStr):
+                    found.append(
+                        "".join(
+                            part.value
+                            for part in argument.values
+                            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                        )
+                    )
+        return found
+
+    def test_every_marker_matches_something_the_extractor_prints(self):
+        printed = self._printed_strings()
+        self.assertTrue(printed, "no print() strings found; the parse broke")
+        orphans = [
+            marker
+            for marker, _percent, _label in self._gui().PROGRESS_STAGES
+            if not any(marker in line for line in printed)
+        ]
+        self.assertEqual(orphans, [], f"progress markers matching no output: {orphans}")
+
+    def test_progress_only_moves_forward(self):
+        percents = [percent for _m, percent, _l in self._gui().PROGRESS_STAGES]
+        self.assertEqual(percents, sorted(percents))
+        self.assertLessEqual(max(percents), 100)
+
+    def test_status_wording_stays_out_of_the_internals(self):
+        jargon = ("TILE", "IMAG", "CAM", "RLE", "SPLT", "PICT", "palette", "audit", "record")
+        leaks = [
+            label
+            for _m, _p, label in self._gui().PROGRESS_STAGES
+            if any(word in label for word in jargon)
+        ]
+        self.assertEqual(leaks, [], f"status text exposing internals: {leaks}")
+
+    def test_mode_cards_avoid_internal_vocabulary(self):
+        jargon = ("TILE", "IMAG", "CAM archive", "RLE", "SPLT", "PICT", "source-audit")
+        offenders = []
+        for mode, content in self._gui().MODE_CONTENT.items():
+            for field in ("title", "summary", "includes", "detail"):
+                text = content[field]
+                for word in jargon:
+                    if word in text:
+                        offenders.append(f"{mode.value}.{field}: {word}")
+        self.assertEqual(offenders, [], f"mode cards exposing internals: {offenders}")
 
 
 class FFmpegSupportTests(unittest.TestCase):

@@ -54,50 +54,65 @@ COLORS = {
 }
 
 
+# Written for someone who has never opened a CAM archive. The game hides
+# shadow and blend information inside its palettes, which is the only genuinely
+# odd idea here, so it is explained in those words rather than named.
 MODE_CONTENT = {
     ExtractionMode.RELEVANT_ART: {
-        "title": "Clean relevant art",
+        "title": "Clean art",
         "badge": "RECOMMENDED",
-        "summary": "The complete, presentation-ready art library.",
-        "includes": "Sprites · profiles · icons · effects · menus · interface maps · segues · loading art",
+        "summary": "Ready to use, with tidy transparent edges.",
+        "includes": "Sprites · portraits · icons · effects · menus · maps · segues · loading art",
         "detail": (
-            "Only documented world-sprite controls are removed. Profiles, icons, "
-            "effects, and UI art keep full palettes. TILE PNGs are source-audited."
+            "The game hides shadow and blending information inside sprite colours. "
+            "Those are made transparent, while portraits, icons and menus keep every "
+            "colour, since there the same values are real art."
         ),
     },
     ExtractionMode.RELEVANT_RAW: {
-        "title": "Relevant art — raw",
-        "badge": "CURATED SOURCE",
-        "summary": "The useful library with game-control colors intact.",
-        "includes": "Same curated art as clean mode · plus original BIK video when cinematics are on",
+        # Kept short: a longer title runs into the badge beside it.
+        "title": "Untouched colours",
+        "badge": "AS STORED",
+        "summary": "The same pictures, exactly as the game stores them.",
+        "includes": "Everything in Clean art · plus the original video files when cinematics are on",
         "detail": (
-            "Keeps sprite shadow, blend, and transition pixels visible. Filters out "
-            "noisy support sets and unrelated archive records."
+            "Nothing is made transparent, so the hidden shadow and blending values "
+            "show up as odd-looking colours. Choose this if you want to see the "
+            "real data rather than a tidied picture."
         ),
     },
     ExtractionMode.ALL_RAW: {
-        "title": "Everything — raw",
-        "badge": "ARCHIVAL",
-        "summary": "Every recognized art record and animation frame.",
-        "includes": "All curated art · every sprite frame · support layers · uncategorized records",
+        "title": "Everything",
+        "badge": "MUCH LARGER",
+        "summary": "The entire contents of the archives, unfiltered.",
+        "includes": "Everything above · every animation frame · internal layers · unidentified art",
         "detail": (
-            "Largest and slowest. No relevance filtering or cleanup; includes "
-            "near-duplicate frames and engine-only layers."
+            "Also pulls out every frame of every animation, the layers the engine "
+            "uses internally, and art nobody has identified yet. Slow, and most of "
+            "it is near-identical frames."
         ),
     },
 }
 
 
-# Milestones the extractor prints, mapped to a share of the run. This is what
-# turns the progress bar from a barber pole into something honest.
+# Milestones the extractor prints, each with the share of the run it marks and
+# the wording to show. The status line used to echo the extractor's own output,
+# which meant the window said "Auditing decoded TILE pixels against source
+# runs". The log window still carries the technical version for anyone who
+# wants it.
+#
+# Markers are matched as substrings, so they must survive the message being
+# reworded. "loading screens" appears in both the with- and without-FFmpeg
+# variants of that line, which an earlier marker of "Extracting maps,
+# cinematics" did not.
 PROGRESS_STAGES = (
-    ("Extracting game art records", 4),
-    ("Extracting curated interface records", 34),
-    ("Extracting maps, cinematics", 52),
-    ("Auditing decoded TILE pixels", 78),
-    ("Writing manifest", 92),
-    ("Creating preview sheets", 96),
-    ("Extraction stages finished", 99),
+    ("Extracting game art records", 4, "Reading heroes, monsters and buildings"),
+    ("Extracting curated interface records", 34, "Reading menus, icons and interface art"),
+    ("loading screens", 52, "Reading loading screens and video"),
+    ("Auditing decoded", 78, "Checking every image against the game files"),
+    ("Writing manifest", 92, "Writing the file list"),
+    ("Creating preview sheets", 96, "Building preview sheets"),
+    ("Extraction stages finished", 99, "Finishing up"),
 )
 
 
@@ -365,7 +380,7 @@ class ExtractorApp:
         ).grid(row=1, column=1, sticky="w")
         tk.Label(
             header,
-            text="Build an organized, source-verified art library from your own installation.",
+            text="Turn your own copy of the game into an organised folder of PNG images.",
             background=COLORS["window"],
             foreground=COLORS["muted"],
             font=(self.ui_family, 10),
@@ -444,7 +459,7 @@ class ExtractorApp:
         ).pack(side="left")
         tk.Label(
             mode_header,
-            text="All three include menus, interface maps, loading art and segues.",
+            text="Whichever you pick, every image is checked against the game's own files afterwards.",
             background=COLORS["window"],
             foreground=COLORS["faint"],
             font=(self.ui_family, 9),
@@ -896,11 +911,11 @@ class ExtractorApp:
             self.messages.put(("error", str(exc)))
 
     def _advance_progress(self, text: str) -> None:
-        for marker, percent in PROGRESS_STAGES:
+        for marker, percent, label in PROGRESS_STAGES:
             if marker in text:
                 if percent > self.progress["value"]:
                     self.progress.configure(value=percent)
-                self.status_var.set(text.strip().rstrip(".") or "Working…")
+                    self.status_var.set(label)
                 break
 
     def _poll_messages(self) -> None:
@@ -914,12 +929,12 @@ class ExtractorApp:
                     total, output = payload
                     self._finish()
                     self.progress.configure(value=100)
-                    self.status_var.set(f"Complete · {total:,} PNG files · source-pixel audit passed")
+                    self.status_var.set(f"Done · {total:,} images · all checked against the game files")
                     self.status_label.configure(foreground=COLORS["success"])
                     if messagebox.askyesno(
                         "Your art library is ready",
-                        f"Created {total:,} PNG files and verified them against the source archives.\n\n"
-                        f"{output}\n\nOpen the folder now?",
+                        f"Saved {total:,} images and checked every one against the game's "
+                        f"own files.\n\n{output}\n\nOpen the folder now?",
                     ):
                         self._open_path(Path(output))
                 elif kind == "error":
