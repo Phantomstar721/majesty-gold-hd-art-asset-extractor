@@ -86,7 +86,7 @@ MODE_CONTENT = {
     ExtractionMode.ALL_RAW: {
         "title": "Everything",
         "badge": "MUCH LARGER",
-        "summary": "The entire contents of the archives, unfiltered.",
+        "summary": "All extractable art and animation, unfiltered.",
         "includes": "Everything above · every animation frame · internal layers · unidentified art",
         "detail": (
             "Also pulls out every frame of every animation, the layers the engine "
@@ -811,7 +811,11 @@ class ExtractorApp:
                 return
             self.game_status_var.set("Detected · ready")
             self.game_status.configure(foreground=COLORS["success"])
-            estimate = estimate_output_size(game, self.mode_var.get())
+            estimate = estimate_output_size(
+                game,
+                self.mode_var.get(),
+                include_cinematics=self.cinematics_var.get(),
+            )
             existing = output
             while not existing.exists() and existing != existing.parent:
                 existing = existing.parent

@@ -2335,7 +2335,12 @@ def extract_mode(
     )
 
 
-def estimate_output_size(game: Path, mode: ExtractionMode | str) -> int:
+def estimate_output_size(
+    game: Path,
+    mode: ExtractionMode | str,
+    *,
+    include_cinematics: bool = False,
+) -> int:
     """Return a conservative output-size estimate without decoding every TILE.
 
     The CAMs use compact indexed/RLE art while output PNGs include per-record
@@ -2353,11 +2358,18 @@ def estimate_output_size(game: Path, mode: ExtractionMode | str) -> int:
         for _label, rel_path in PICTURE_CAM_SOURCES
         if (game / rel_path).exists()
     )
+    # Loading screens are small raster records in the presentation archives and
+    # are always extracted. The Bink cinematics and quest-map animations account
+    # for nearly all of those archives and only contribute output when selected.
+    presentation_factor = 0.10
+    if include_cinematics:
+        presentation_factor = 0.80 if selected is ExtractionMode.RELEVANT_ART else 1.25
+
     if selected is ExtractionMode.ALL_RAW:
-        return int(art_source_bytes * 2.75 + presentation_source_bytes * 1.25)
+        return int(art_source_bytes * 2.75 + presentation_source_bytes * presentation_factor)
     if selected is ExtractionMode.RELEVANT_RAW:
-        return int(art_source_bytes * 0.55 + presentation_source_bytes * 1.25)
-    return int(art_source_bytes * 0.45 + presentation_source_bytes * 0.80)
+        return int(art_source_bytes * 0.55 + presentation_source_bytes * presentation_factor)
+    return int(art_source_bytes * 0.45 + presentation_source_bytes * presentation_factor)
 
 
 def confirm_output_clear(output_root: Path, *, assume_yes: bool = False) -> bool:
@@ -2394,12 +2406,14 @@ def confirm_output_clear(output_root: Path, *, assume_yes: bool = False) -> bool
     return answer.strip().lower() in {"y", "yes"}
 
 
-def resolve_cli_ffmpeg(*, want_cinematics: bool, assume_yes: bool) -> Path | None:
+def resolve_cli_ffmpeg(
+    *, want_cinematics: bool, download_without_prompt: bool = False
+) -> Path | None:
     """Work out which FFmpeg, if any, this command-line run should use.
 
     An FFmpeg already on the machine is used without asking. A download only
     happens when --cinematics was passed and the person at the keyboard says
-    yes, or when --yes made that decision in advance.
+    yes, or when --download-ffmpeg made that separate decision in advance.
     """
     existing = ffmpeg_support.find_ffmpeg()
     if existing is not None:
@@ -2409,11 +2423,11 @@ def resolve_cli_ffmpeg(*, want_cinematics: bool, assume_yes: bool) -> Path | Non
         return None
 
     def confirm(message: str) -> bool:
-        if assume_yes:
+        if download_without_prompt:
             return True
         if not sys.stdin or not sys.stdin.isatty():
             print("\n" + message)
-            print("No console input available. Re-run with --yes to accept.")
+            print("No console input available. Re-run with --download-ffmpeg to accept.")
             return False
         print("\n" + message)
         try:
@@ -2486,6 +2500,14 @@ def main() -> int:
             "other category extracts without it."
         ),
     )
+    parser.add_argument(
+        "--download-ffmpeg",
+        action="store_true",
+        help=(
+            "Download FFmpeg without prompting if it is missing; implies "
+            "--cinematics"
+        ),
+    )
     args = parser.parse_args()
 
     game = resolve_game_path(args.game)
@@ -2498,7 +2520,11 @@ def main() -> int:
         print("Cancelled. Nothing was changed.")
         return 1
 
-    ffmpeg = resolve_cli_ffmpeg(want_cinematics=args.cinematics, assume_yes=args.yes)
+    want_cinematics = args.cinematics or args.download_ffmpeg
+    ffmpeg = resolve_cli_ffmpeg(
+        want_cinematics=want_cinematics,
+        download_without_prompt=args.download_ffmpeg,
+    )
 
     mode = ExtractionMode.ALL_RAW if args.full else ExtractionMode(args.mode)
     total = extract_mode(game, output, mode, limit=args.limit, ffmpeg=ffmpeg)

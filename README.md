@@ -39,7 +39,7 @@ launcher offers to install it.
 | --- | --- |
 | **Clean art** | Sprites with tidy transparent edges, ready to use. The default. |
 | **Untouched colours** | The same pictures exactly as the game stores them, nothing made transparent. |
-| **Everything** | The entire contents of the archives, including every animation frame and internal layers. Much larger. |
+| **Everything** | All extractable art and animation: every frame, internal art layers and unidentified artwork. Much larger. |
 
 The one idea worth knowing: **the game hides shadow and blending information
 inside sprite colours.** Clean art turns those into transparency, which is what
@@ -124,16 +124,18 @@ in the first place. Quick sample runs (`--limit`) stop before it and say so.
 
 ## Command line
 
-The same executable takes arguments, and prints to the console you ran it from:
+The packaged executable is intended for the graphical window. Because it is a
+Windows GUI application, a command shell does not wait for it like a normal
+console program. For reliable command-line use, run the source launcher:
 
 ```powershell
-".\Majesty Art Extractor.exe" --out D:\art
-".\Majesty Art Extractor.exe" --game "D:\SteamLibrary\steamapps\common\Majesty HD"
-".\Majesty Art Extractor.exe" --mode all-raw --cinematics
-".\Majesty Art Extractor.exe" --limit 5
+.\run_extractor.cmd --out D:\art
+.\run_extractor.cmd --game "D:\SteamLibrary\steamapps\common\Majesty HD"
+.\run_extractor.cmd --mode all-raw --cinematics
+.\run_extractor.cmd --limit 5
 ```
 
-From source, the same options work through `py -3 scripts\extract_assets.py`.
+The same options also work through `py -3 scripts\extract_assets.py`.
 
 | Option | Effect |
 | --- | --- |
@@ -141,6 +143,7 @@ From source, the same options work through `py -3 scripts\extract_assets.py`.
 | `--out` | Where to write the art |
 | `--mode` | `relevant-art` (default), `relevant-raw`, or `all-raw` |
 | `--cinematics` | Include cinematics and quest maps; offers to fetch FFmpeg if needed |
+| `--download-ffmpeg` | Include cinematics and, if needed, download FFmpeg without asking |
 | `--limit N` | Stop after N records. A quick sample: skips video and the image check |
 | `--zip` | Also write a zip beside the output folder |
 | `--yes` | Do not ask before clearing the output folder |

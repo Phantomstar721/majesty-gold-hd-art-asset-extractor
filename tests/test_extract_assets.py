@@ -28,11 +28,13 @@ from extract_assets import (  # noqa: E402
     decode_tile_v3,
     is_inside,
     is_palette_key_color,
+    estimate_output_size,
     presentation_category,
     preview_cell_label,
     edge_connected_index_offsets,
     expected_tile_opaque_pixels,
     resolve_game_path,
+    resolve_cli_ffmpeg,
     should_preserve_full_palette,
     should_recover_enclosed_transparency,
     steam_installdir,
@@ -107,6 +109,21 @@ class ExtractionModeTests(unittest.TestCase):
         self.assertFalse(ExtractionMode.RELEVANT_RAW.exhaustive)
         self.assertFalse(ExtractionMode.RELEVANT_RAW.clean_art)
         self.assertTrue(ExtractionMode.RELEVANT_ART.clean_art)
+
+    def test_space_estimate_accounts_for_cinematics(self):
+        with tempfile.TemporaryDirectory() as temp_value:
+            game = Path(temp_value)
+            for relative in ("Data/maindata.cam", "Data/interfacedata.cam"):
+                path = game / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"a" * 100)
+            presentation = game / "Data/cinedata1.cam"
+            presentation.write_bytes(b"v" * 1_000)
+
+            for mode in ExtractionMode:
+                without_video = estimate_output_size(game, mode, include_cinematics=False)
+                with_video = estimate_output_size(game, mode, include_cinematics=True)
+                self.assertGreater(with_video, without_video, mode.value)
 
 
 class PresentationArtTests(unittest.TestCase):
@@ -731,6 +748,30 @@ class FFmpegSupportTests(unittest.TestCase):
                     os.environ.pop("MAJESTY_FFMPEG", None)
                 else:
                     os.environ["MAJESTY_FFMPEG"] = previous
+
+    def test_noninteractive_download_requires_its_own_consent(self):
+        original_find = ffmpeg_support.find_ffmpeg
+        original_resolve = ffmpeg_support.resolve_ffmpeg
+        original_stdin = sys.stdin
+        calls: list[bool] = []
+
+        def fake_resolve(**kwargs):
+            calls.append(kwargs["confirm"]("download?"))
+            return None
+
+        try:
+            ffmpeg_support.find_ffmpeg = lambda: None
+            ffmpeg_support.resolve_ffmpeg = fake_resolve
+            sys.stdin = None
+
+            resolve_cli_ffmpeg(want_cinematics=True)
+            resolve_cli_ffmpeg(want_cinematics=True, download_without_prompt=True)
+        finally:
+            ffmpeg_support.find_ffmpeg = original_find
+            ffmpeg_support.resolve_ffmpeg = original_resolve
+            sys.stdin = original_stdin
+
+        self.assertEqual(calls, [False, True])
 
 
 def _tile_v3(*, x_end: int, pixels: bytes, flags: int) -> bytes:
