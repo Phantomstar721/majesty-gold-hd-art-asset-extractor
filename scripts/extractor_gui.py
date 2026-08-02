@@ -25,11 +25,13 @@ import ffmpeg_support
 from extract_assets import (
     DEFAULT_OUT,
     ExtractionMode,
+    describe_existing_contents,
     estimate_output_size,
     extract_mode,
     format_bytes,
     is_game_folder,
     resolve_game_path,
+    validate_output_root,
 )
 
 
@@ -841,11 +843,28 @@ class ExtractorApp:
             messagebox.showerror("Destination required", "Choose where the extracted art library should be written.")
             return
         output = Path(output_text)
-        if output.exists() and any(output.iterdir()):
+        # Paths nobody could mean are refused outright. Everything else is the
+        # user's call, so show exactly what would be lost and let them decide.
+        try:
+            validate_output_root(game, output)
+        except ValueError as error:
+            messagebox.showerror("That folder cannot be used", str(error))
+            return
+
+        existing = describe_existing_contents(output)
+        if existing is not None:
+            count, names = existing
+            listing = "\n".join(f"    {name}" for name in names)
+            if count > len(names):
+                listing += f"\n    ... and {count - len(names):,} more"
             if not messagebox.askyesno(
-                "Replace the existing extraction?",
-                "Everything in this folder will be deleted and rebuilt:\n\n"
-                f"{output}\n\nContinue?",
+                "Delete everything in this folder?",
+                f"{output}\n\n"
+                f"This folder holds {count:,} items and was not created by this tool.\n"
+                f"All of it will be permanently deleted:\n\n{listing}\n\n"
+                "Continue?",
+                icon="warning",
+                default="no",
             ):
                 return
 

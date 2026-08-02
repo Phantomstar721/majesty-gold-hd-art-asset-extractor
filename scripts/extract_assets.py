@@ -1973,18 +1973,17 @@ def protected_output_roots() -> list[Path]:
 
 
 def validate_output_root(game: Path, output_root: Path) -> None:
-    """Refuse output folders where a full delete would be destructive.
+    """Refuse the output folders that could only ever be a mistake.
 
-    The output folder is cleared with rmtree at the start of every run, so this
-    is the only thing standing between a mistyped --out and real data loss. It
-    checks three separate ways rather than matching a short list of exact paths:
+    The folder is cleared with rmtree at the start of every run, so something
+    has to stand between a mistyped path and real data loss. This is the hard
+    half of that, and it is deliberately narrow: drive roots, Windows and
+    profile folders, and anything entangled with the game or this tool. Nobody
+    means those.
 
-    1. The folder must not be a drive root or a known Windows/profile folder.
-    2. It must not be, contain, or sit inside the game installation, and it must
-       not contain this tool.
-    3. If it already exists with contents, it must carry this tool's marker
-       file, proving a previous run created it. That is what protects folders
-       nobody could enumerate in advance.
+    A folder the user picked and filled themselves is not a mistake, so it is
+    not refused here. See describe_existing_contents, which lets the caller ask
+    before deleting instead of overruling the choice.
     """
     try:
         resolved_output = output_root.resolve()
@@ -2014,20 +2013,34 @@ def validate_output_root(game: Path, output_root: Path) -> None:
     if is_inside(resolved_tool, resolved_output):
         refuse("  This extractor is inside it, so clearing it would delete the tool.")
 
-    # An existing folder is only cleared when a previous run left its marker.
-    if resolved_output.exists():
-        if not resolved_output.is_dir():
-            refuse("  That path is a file, not a folder.")
-        try:
-            has_contents = any(resolved_output.iterdir())
-        except OSError as error:
-            raise ValueError(f"Output folder cannot be read: {resolved_output}") from error
-        if has_contents and not (resolved_output / OUTPUT_MARKER).exists():
-            refuse(
-                "  It already contains files and was not created by this tool.\n"
-                "  Everything in the output folder is deleted at the start of a run,\n"
-                "  so this is refused rather than risking your files."
-            )
+    if resolved_output.exists() and not resolved_output.is_dir():
+        refuse("  That path is a file, not a folder.")
+
+
+def describe_existing_contents(output_root: Path) -> tuple[int, list[str]] | None:
+    """What a run would delete from an existing folder, if anything worth asking about.
+
+    Returns None when there is nothing to warn about: the folder is missing,
+    empty, or carries this tool's marker because a previous run made it.
+    Otherwise returns how many entries would go and a few of their names, so
+    the caller can show the user what they are agreeing to.
+    """
+    try:
+        resolved = output_root.resolve()
+    except OSError:
+        return None
+    if not resolved.is_dir():
+        return None
+    if (resolved / OUTPUT_MARKER).exists():
+        return None
+    try:
+        entries = sorted(resolved.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        return None
+    if not entries:
+        return None
+    names = [f"{entry.name}{'/' if entry.is_dir() else ''}" for entry in entries[:8]]
+    return len(entries), names
 
 
 def is_inside(path: Path, parent: Path) -> bool:
@@ -2348,33 +2361,28 @@ def estimate_output_size(game: Path, mode: ExtractionMode | str) -> int:
 
 
 def confirm_output_clear(output_root: Path, *, assume_yes: bool = False) -> bool:
-    """Ask before deleting an existing output folder. True means go ahead.
+    """Ask before deleting a folder this tool did not create. True means go ahead.
 
-    Only reached for folders validate_output_root already accepted, so this is
-    a second look rather than the safety net. Returns True without asking when
-    there is nothing to lose, or when stdin is not a terminal, which keeps the
-    GUI and scripted runs working; the GUI asks its own question first.
+    Not a safety net: validate_output_root has already turned away the paths
+    nobody could mean. This is here so that choosing a folder with your own
+    files in it is a decision you make rather than one the tool makes for you.
     """
-    if assume_yes or not output_root.exists():
+    if assume_yes:
         return True
-    try:
-        entries = list(output_root.iterdir())
-    except OSError:
+    existing = describe_existing_contents(output_root)
+    if existing is None:
         return True
-    removable = [entry for entry in entries if entry.name != OUTPUT_MARKER]
-    if not removable:
-        return True
-    if not sys.stdin or not sys.stdin.isatty():
-        return True
+    count, names = existing
 
-    print(f"\nThis folder already holds {len(removable):,} items and will be emptied first:")
-    print(f"  {output_root}")
-    for entry in sorted(removable, key=lambda item: item.name)[:8]:
-        print(f"    {entry.name}{'/' if entry.is_dir() else ''}")
-    if len(removable) > 8:
-        print(f"    ... and {len(removable) - 8:,} more")
+    print(f"\n{output_root}")
+    print(f"This folder holds {count:,} items and was not created by this tool.")
+    print("Everything in it will be permanently deleted:")
+    for name in names:
+        print(f"    {name}")
+    if count > len(names):
+        print(f"    ... and {count - len(names):,} more")
     try:
-        answer = input("Delete this folder's contents and continue? [y/N] ")
+        answer = input("Delete all of it and continue? [y/N] ")
     except EOFError:
         # No console to answer on. Cancelling is the safe default; say how to
         # proceed deliberately instead of leaving the user guessing.

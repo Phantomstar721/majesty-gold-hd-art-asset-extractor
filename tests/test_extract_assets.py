@@ -24,6 +24,7 @@ from extract_assets import (  # noqa: E402
     cinematic_soundtrack_path,
     confirm_output_clear,
     decode_splash_picture,
+    describe_existing_contents,
     decode_tile_v3,
     is_inside,
     is_palette_key_color,
@@ -246,11 +247,43 @@ class OutputSafetyTests(unittest.TestCase):
         (previous / "heroes").mkdir()
         self.assertAllowed(previous)
 
-    def test_folder_holding_unrelated_files_is_refused(self):
-        theirs = self.base / "documents"
+    def test_a_folder_the_user_chose_is_allowed_but_described(self):
+        """Their folder, their call. The tool warns; it does not overrule.
+
+        Refusing this outright was wrong: picking a folder you made and filled
+        is a decision, not a typo.
+        """
+        theirs = self.base / "Majesty Asset Test"
         theirs.mkdir()
-        (theirs / "taxes.pdf").write_bytes(b"x")
-        self.assertRefused(theirs)
+        (theirs / "notes.txt").write_bytes(b"x")
+        (theirs / "old art").mkdir()
+        self.assertAllowed(theirs)
+
+        described = describe_existing_contents(theirs)
+        self.assertIsNotNone(described)
+        count, names = described
+        self.assertEqual(count, 2)
+        self.assertIn("old art/", names)
+        self.assertIn("notes.txt", names)
+
+    def test_nothing_to_describe_for_empty_or_our_own_folders(self):
+        self.assertIsNone(describe_existing_contents(self.base / "missing"))
+        empty = self.base / "empty-one"
+        empty.mkdir()
+        self.assertIsNone(describe_existing_contents(empty))
+        ours = self.base / "ours-again"
+        ours.mkdir()
+        (ours / OUTPUT_MARKER).write_text("x", encoding="utf-8")
+        (ours / "heroes").mkdir()
+        self.assertIsNone(describe_existing_contents(ours))
+
+    def test_the_confirmation_is_what_stops_an_unattended_delete(self):
+        theirs = self.base / "with-files"
+        theirs.mkdir()
+        (theirs / "keep.txt").write_bytes(b"x")
+        # No console to answer on, so it declines rather than deleting.
+        self.assertFalse(confirm_output_clear(theirs))
+        self.assertTrue(confirm_output_clear(theirs, assume_yes=True))
 
     def test_the_game_and_anything_around_it_is_refused(self):
         self.assertRefused(self.game)
@@ -280,13 +313,8 @@ class OutputSafetyTests(unittest.TestCase):
         marked = self.base / "marked"
         marked.mkdir()
         (marked / OUTPUT_MARKER).write_text("x", encoding="utf-8")
+        (marked / "heroes").mkdir()
         self.assertTrue(confirm_output_clear(marked))
-
-    def test_assume_yes_skips_the_prompt(self):
-        folder = self.base / "full"
-        folder.mkdir()
-        (folder / "old.png").write_bytes(b"x")
-        self.assertTrue(confirm_output_clear(folder, assume_yes=True))
 
     def test_is_inside_is_case_insensitive_and_not_prefix_fooled(self):
         self.assertTrue(is_inside(Path(r"C:\Games\Majesty HD\Data"), Path(r"c:\games\majesty hd")))
