@@ -1,293 +1,241 @@
 # Majesty Gold HD Art Asset Extractor
 
-Tooling for making a private PNG reference library from an installed copy of
-**Majesty Gold HD**.
+Turn your own copy of **Majesty Gold HD** into an organised folder of PNG
+images: hero and monster sprites, building art, portraits, icons, spell
+effects, menus, maps, loading screens and cinematics.
 
-**Important:** this repository contains tooling only. It does not include,
-redistribute, or publish Majesty game assets. The extractor reads files from
-your own local Majesty HD installation and writes private local output under
-`output/`, which is gitignored.
+**This repository contains tooling only.** It includes no Majesty game assets
+and redistributes none. It reads the copy of the game you already own and
+writes to your own machine. Extracted art belongs to the game's owners; keep it
+to yourself unless you have permission to share it.
 
-## Scope
+## Getting started
 
-The extractor focuses on art that is useful for modding and reference:
+Download `Majesty Art Extractor.exe`, put it in a folder of its own, and
+double-click it.
 
-- Hero profile portraits, small hero icons, and hero sprites
-- Monster profile art, small monster icons, and monster sprites
-- Building profile art, small building icons, and building/lair sprites
-- Weapon, armor, item, and spell icons
-- Spell, projectile, and overlay effect sprites
-- Main menus, options, quest selection, and other full-screen interface art
-- Quest maps and animated quest-segue illustrations
-- Cinematic sample frames and contact sheets
-- Base and expansion loading screens
+**Nothing to install.** No Python, no pip, no setup. Everything the tool needs
+is inside that one file.
 
-Known assets are sorted into specific folders. Unknown main/interface records
-and most extra animation frames are skipped by default because they produce a
-large amount of noisy output; use `--mode all-raw` if you want exhaustive dumps under
-`other/main/` and `other/interface/`.
+The window finds your Majesty installation on its own, offers three levels of
+extraction, and shows how much space each will take against the free space on
+the drive you have chosen.
 
-## Setup
+### Running from source instead
 
-There isn't one. Unzip it and double-click `run_extractor.cmd`.
+If you would rather run the Python directly, clone the repository and use the
+launcher:
 
 ```powershell
 .\run_extractor.cmd
 ```
 
-**No pip, no virtual environment, no network.** The extractor runs on a stock
-Python 3.9+ install using only the standard library.
+That needs Python 3.9 or newer and nothing else. If Python is missing, the
+launcher offers to install it.
 
-Python itself is the one prerequisite. If it is missing, the launcher shows a
-window explaining that and offering to install it, through Windows Package
-Manager where available and the official download page otherwise. Once Python
-is there the window never appears again. The extractor cannot present this
-itself, having no Python to run on.
+## The three modes
 
-The one exception is **Bink video**, which the game uses for two categories:
-`cinematics` and the animated `maps/quest`. Bink is proprietary with no
-pure-Python decoder, so those need FFmpeg. Everything else, segues and
-interface maps included, extracts without it.
+| Mode | What you get |
+| --- | --- |
+| **Clean art** | Sprites with tidy transparent edges, ready to use. The default. |
+| **Untouched colours** | The same pictures exactly as the game stores them, nothing made transparent. |
+| **Everything** | The entire contents of the archives, including every animation frame and internal layers. Much larger. |
 
-That is a tick-box in the window, off by default unless FFmpeg is already on
-your machine. Tick it and, if you don't have FFmpeg, you are shown exactly what
-would be downloaded and from where before anything happens.
+The one idea worth knowing: **the game hides shadow and blending information
+inside sprite colours.** Clean art turns those into transparency, which is what
+gives sprites their tidy edges. Portraits, icons and menus keep every colour,
+because in those the same values are ordinary art rather than instructions.
 
-The modern lightweight window auto-detects Majesty Gold HD, presents the three
-modes as detailed cards, and shows a conservative output estimate alongside
-free disk space. Progress and source-audit status stay visible while the
-technical log opens separately on demand. The default output is `output\assets`
-beside the tool.
+Untouched colours leaves all of it visible, which is useful if you want to see
+what is genuinely stored rather than a tidied picture.
 
-### Extraction modes
+## Cinematics
 
-1. **All raw content** exports every recognized frame, support layer, and
-   uncategorized art record. Palette-control pixels are left visible. This is
-   the slowest and largest option.
-2. **Relevant sprites and menu art (raw)** keeps useful sprites, menus, maps,
-   cinematics, segues, and loading screens but leaves Majesty's raw
-   shadow/blend/transition palette colors visible.
-3. **Relevant art (clean PNGs)** is the default. It keeps useful sprites,
-   effects, profiles, icons, menus, maps, cinematics, segues, and loading
-   screens while making engine-only controls transparent in sprite palettes.
-   Profiles, icons, effects, and presentation/UI palettes are preserved because
-   their high indices are real colors rather than sprite shadow controls.
+Majesty stores cinematics and the animated quest maps as Bink video, which
+needs FFmpeg. Everything else, including segues and interface maps, extracts
+without it.
 
-Here, “raw” means a directly decoded PNG, not a proprietary `.TILE` file. PNGs
-remain easy to inspect while faithfully showing the pixels stored for the game
-engine.
+There is a tick-box for this in the window. It starts switched on if FFmpeg is
+already on your machine, and off otherwise. Switch it on and, if you do not
+have FFmpeg, you are shown the exact address it would be downloaded from, how
+large it is, and where it would be saved, before anything is fetched. Decline
+and the rest of the extraction runs normally.
 
-## Extract
+Cinematics become playable MP4 videos with their in-game sound, plus twelve
+evenly spaced full-resolution stills and a contact sheet. Quest maps become
+stills and contact sheets, which captures the sequence without saving hundreds
+of near-identical frames.
 
-```powershell
-py -3 scripts\extract_assets.py
-```
+## Where the art goes
 
-By default the script auto-discovers Majesty HD from:
-
-- `MAJESTY_HD_DIR`, if that environment variable is set
-- the default Steam path, `C:\Program Files (x86)\Steam\steamapps\common\Majesty HD`
-- Steam library folders listed in `steamapps\libraryfolders.vdf`
-
-By default, generated output goes to `output\assets` next to the unpacked
-extractor folder. In other words, if you unzip this tool to
-`D:\Tools\majesty-gold-hd-art-asset-extractor`, the default output is
-`D:\Tools\majesty-gold-hd-art-asset-extractor\output\assets`.
-
-Useful options:
-
-```powershell
-py -3 scripts\extract_assets.py --game "D:\SteamLibrary\steamapps\common\Majesty HD"
-py -3 scripts\extract_assets.py --out output\assets --zip
-py -3 scripts\extract_assets.py --mode relevant-raw
-py -3 scripts\extract_assets.py --mode all-raw
-py -3 scripts\extract_assets.py --limit 5
-py -3 scripts\extract_assets.py --yes
-.\run_extractor.cmd --zip
-```
-
-`--full` remains as a backwards-compatible alias for `--mode all-raw`.
-`--yes` skips the confirmation shown before an existing output folder is
-cleared. `--limit` is a quick sample: it stops early, so it skips presentation
-art and the source-pixel audit, and it tells you so.
-
-The default run is curated. It exports profile art, icons, representative
-hero/monster/building/lair sprites, spell effects, presentation art, `_previews/`,
-and `_manifest.csv`. Cinematics become playable H.264 MP4 videos as well as
-twelve evenly spaced full-resolution PNG samples and contact sheets. Raw modes
-also retain the original embedded `.bik` cinematics. Quest-map movies become
-twelve samples plus contact sheets; this captures their visual sequence without
-dumping every near-duplicate frame. Use `--mode all-raw` when you want the large
-exhaustive dump of sprite animation frames, support layers, and uncategorized
-records.
-
-The MP4s include their in-game sound. MV02, MV04, and MV07 carry native Bink
-audio, which is preserved and converted to AAC. MV01 and MV06 are silent credit
-reels in the archives; Majesty plays the menu's `GeneralTheme.mp3` alongside
-them at runtime, so the extractor adds that theme to those two MP4s and trims
-it at the end of the video. Raw modes still preserve the untouched `.bik`
-files, including their original audio-stream layout.
-
-### The output folder is emptied
-
-Generated output goes under `output/` by default and is gitignored.
-
-**Everything in the output folder is deleted at the start of every run.** Three
-separate checks stand in front of that:
-
-- Drive roots, Windows system folders, and profile folders such as Documents,
-  Desktop and Downloads are refused outright.
-- The game installation is refused, along with anything inside it and any
-  folder that contains it.
-- An existing folder is only cleared when it carries this tool's marker file,
-  written by a previous run. **A folder holding your own files is refused**
-  rather than emptied, so a mistyped path cannot cost you anything.
-
-The GUI asks before replacing a non-empty folder. The command line asks too,
-listing what would be removed; pass `--yes` to skip the prompt in a script.
-
-### Source-pixel audit
-
-A full extraction finishes with a source-pixel occupancy audit. For each
-TILE-derived PNG it independently counts the pixels encoded in the archive's v3
-RLE runs or v1 raster, then checks the PNG's alpha count against it. Extraction
-fails loudly if the renderer drops a stored value, including an explicit
-palette-index-zero pixel, or invents an opaque pixel.
-
-Two honest limits. The audit applies the same transparency rules the renderer
-does, so it proves the renderer is faithful to those rules rather than proving
-the rules are right; it catches dropped and invented pixels, not a wrong policy.
-And `--limit` runs stop before it, which they now say out loud.
-
-`--zip` creates a local zip next to the output folder. Keep that zip private
-unless you have permission to redistribute the extracted assets.
-
-## Output Layout
+By default, an `output\assets` folder beside the tool. You can point it
+anywhere.
 
 ```text
 output/assets/
-  heroes/sprites/
-  monsters/sprites/
-  buildings/sprites/
-  buildings/lairs/
+  heroes/sprites/          monsters/sprites/
+  buildings/sprites/       buildings/lairs/
   spell_effects/
-  icons/heroes/
-  icons/monsters/
-  icons/buildings/
-  icons/weapons/
-  icons/armor/
-  icons/items/
-  icons/spells/
-  profile_art/heroes/
-  profile_art/monsters/
-  profile_art/buildings/
-  menus/
-  maps/interface/
-  maps/quest/
-  cinematics/              # MP4 + samples; raw modes also include BIK
-  segues/
-  loading_screens/
+  icons/heroes/            icons/monsters/      icons/buildings/
+  icons/weapons/           icons/armor/         icons/items/     icons/spells/
+  profile_art/heroes/      profile_art/monsters/  profile_art/buildings/
+  menus/                   maps/interface/      maps/quest/
+  cinematics/              segues/              loading_screens/
   _previews/
   _manifest.csv
 ```
 
-Each extracted record gets its own folder. Animation frames are saved as PNGs
-with the image-set name, direction slot, frame number, and source TILE index in
-the filename.
+Every record gets its own folder. Animation frames are named with the
+animation, direction, frame number and the source tile they came from, so a
+file can always be traced back.
 
-`_previews/` contains quick contact-sheet PNGs for sprite-heavy records. These
-are not perfect in-game reconstructions, but they upscale representative
-standing/active/build frames so a human can quickly recognize a hero, monster,
-building, lair, or effect without opening dozens of tiny frame files.
+`_previews/` holds contact sheets for the sprite-heavy records. They are not
+in-game reconstructions; they enlarge a few representative frames so you can
+recognise a hero or building at a glance instead of opening dozens of tiny
+files.
 
-Placed building art is mostly stored as non-directional TILE references rather
-than hero-style directional animation frames. The extractor handles both paths:
-directional records become frame PNGs, and non-directional building states
-become variant PNGs such as `Active_variant00_tile00931.png`.
+`_manifest.csv` lists every image with its category, source archive, record and
+tile index.
 
-Building records also contain many numeric image sets that appear to be support
-layers, masks, rubble pieces, animation internals, or other not-yet-named data.
-Those are skipped during normal extraction instead of being mixed into the
-human-readable `buildings/sprites/` folders. Use `--mode all-raw` to keep those records
-under `other/main/`.
+### The output folder is emptied
 
-## Tests
+**Everything in the output folder is deleted at the start of every run**, so it
+can be rebuilt cleanly.
 
-The decoders, the output-folder guard and the category routing have unit tests
-that need neither the game nor a network:
+Folders that could only ever be a mistake are refused outright: drive roots,
+Windows and Program Files, your user folder, Documents, Desktop, Downloads
+themselves, and the game installation or anything containing it.
+
+Any other folder is your choice. If it already holds files the tool did not put
+there, you are shown what is in it and asked before a single file is removed.
+Once a run finishes, the folder is marked as the tool's own and you are not
+asked again.
+
+## Every image is checked
+
+After extracting, the tool independently re-reads the game archives, counts the
+pixels each image should contain, and compares that against the PNG it wrote.
+If anything was dropped or invented, the run fails and says so rather than
+quietly handing you damaged art.
+
+Worth being clear about what that proves: the check applies the same rules the
+decoder does, so it catches lost and invented pixels, not a rule that is wrong
+in the first place. Quick sample runs (`--limit`) stop before it and say so.
+
+## Command line
+
+The same executable takes arguments, and prints to the console you ran it from:
 
 ```powershell
-py -3 -m unittest discover -s tests
+".\Majesty Art Extractor.exe" --out D:\art
+".\Majesty Art Extractor.exe" --game "D:\SteamLibrary\steamapps\common\Majesty HD"
+".\Majesty Art Extractor.exe" --mode all-raw --cinematics
+".\Majesty Art Extractor.exe" --limit 5
 ```
 
-## Scope: this tool only reads
+From source, the same options work through `py -3 scripts\extract_assets.py`.
 
-The extractor reads your installation and writes PNGs. It does not write to the
-game, encode TILEs, or patch CAM archives, and it depends on no other
-repository. Cloning this one is enough to run everything in it.
-
-## No dependencies
-
-Everything except cinematics runs on the Python standard library. There is no
-`requirements.txt` because there are no requirements.
-
-`scripts/imaging.py` supplies the imaging this needs: an RGBA buffer, a PNG
-encoder and decoder built on `zlib`, nearest and box resampling, compositing,
-and a small embedded bitmap font for the labels on contact sheets. It is not a
-general imaging library, only what this tool asks for.
-
-That turned out to be a speed win rather than a sacrifice. Building scanlines
-as bytes beats several hundred thousand per-pixel calls, so decoding and
-writing the 768x520 main menu backdrop takes 0.24s against Pillow's 0.45s, and
-the exported art is about 15% smaller for pixel-identical images.
-
-Bink video is the exception. It is proprietary and cannot be decoded in pure
-Python, so those records need FFmpeg. Exactly two categories are affected:
-
-| Category | Without FFmpeg |
+| Option | Effect |
 | --- | --- |
-| `cinematics` | skipped |
-| `maps/quest` | skipped |
-| `segues`, `maps/interface`, everything else | extracted normally |
+| `--game` | Where Majesty is installed, if it is not found automatically |
+| `--out` | Where to write the art |
+| `--mode` | `relevant-art` (default), `relevant-raw`, or `all-raw` |
+| `--cinematics` | Include cinematics and quest maps; offers to fetch FFmpeg if needed |
+| `--limit N` | Stop after N records. A quick sample: skips video and the image check |
+| `--zip` | Also write a zip beside the output folder |
+| `--yes` | Do not ask before clearing the output folder |
 
-An FFmpeg already on your PATH, or named by `MAJESTY_FFMPEG`, is used
-automatically. Otherwise the tool offers to fetch one, naming the source and
-verifying the publisher's SHA-256 before it is unpacked, and takes no for an
-answer. A run without it still passes the source-pixel audit.
+`--full` still works as an older name for `--mode all-raw`.
 
-## TILE format
+The game is found automatically from `MAJESTY_HD_DIR`, the Steam registry
+entry, the default Steam path, and any Steam library folders you have
+configured, including installs whose folder has been renamed.
 
-TILE v3 RLE stores each opaque run's **exclusive end** column (not start). Its
-packed run word uses eleven low count bits and upper flag bits, allowing wide
-menu rows; palette-less variants store RGB565 pixels instead of indices. Gaps
-between runs are transparent, while every explicitly stored value—including
-palette index zero—is artwork. Clean
-sprite extraction treats index `247` as the transition/seam control and
-`248-250` as shadow bands, as confirmed by Phantom's Haunt. Magenta key ramps
-are also removed by color. Indices `251-254` remain visible when they hold
-ordinary colors, as they do in the Gazebo's white highlights. Full-screen
-Profiles, icons, effects, and sepia/menu palettes use the high range as ordinary
-colors and therefore retain it. Indexed UI and presentation art is also checked
-for a legacy transparent-index collision: only pixels connected to the image
-edge remain transparent, while enclosed artwork pixels are restored. Indexed,
-full-background profile portraits are decoded as opaque full-palette paintings
-rather than applying sprite shadow/control-index removal to their facial colors.
+## Sprite sheets
 
-16-bit RGB565 art has no alpha channel and no transparent-index field, so
-`0x0000` is ambiguous: pure black in a background, or the cutout in a sprite
-layer. It is resolved by output category. Backgrounds keep their black; sprite
-layers keep their silhouette. Reading it as transparent everywhere punched
-17,801 holes through the main menu backdrop while leaving the pixels one step
-off black untouched.
-
-See [docs/TILE_V3_RLE_ROOT_CAUSE.md](docs/TILE_V3_RLE_ROOT_CAUSE.md).
-
-### Sprite sheet export
-
-One animation of one unit, laid out a direction per row and aligned on the
-hotspots stored in the archive, with a JSON manifest naming the source tile
+One animation of one unit on a single sheet, a direction per row, aligned on
+the hotspots stored in the archive, with a manifest naming the source tile
 behind every cell:
 
 ```powershell
 py -3 scripts\export_sprite_sheet.py --record AVB1 --set Stand --out output\sheets\AVB1_Stand
 ```
+
+## For developers
+
+### No dependencies
+
+Everything except cinematics runs on the Python standard library. There is no
+`requirements.txt` because there are no requirements.
+
+`scripts/imaging.py` provides what the tool needs: an RGBA buffer, a PNG
+encoder and decoder over `zlib`, nearest and box resampling, compositing, and a
+small embedded bitmap font for contact-sheet labels. It is not a general
+imaging library.
+
+Bink video is the exception, being proprietary. Exactly two categories are
+affected:
+
+| Category | Without FFmpeg |
+| --- | --- |
+| `cinematics` | skipped |
+| `maps/quest` | skipped |
+| everything else | extracted normally |
+
+FFmpeg already on `PATH`, or named by the `MAJESTY_FFMPEG` environment
+variable, is used automatically.
+
+### This tool only reads
+
+It does not write to the game, encode tiles, or modify archives, and it depends
+on no other repository. Cloning this one is enough to run everything in it.
+
+### Tests
+
+```powershell
+py -3 -m unittest discover -s tests
+```
+
+They need neither the game nor a network.
+
+### Building the executable
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Exe.ps1
+```
+
+PyInstaller is installed into a separate `.venv-build`, so `.venv` stays a
+faithful test of the no-dependencies claim. FFmpeg is deliberately not bundled:
+it is larger than everything else combined and only two categories need it.
+
+### TILE format
+
+TILE v3 stores run-length rows where each run records its **exclusive end**
+column, so pixels belong in `[x_end - count, x_end)`. Count occupies the low
+eleven bits of the packed run word, which allows the wide runs full-screen menu
+art needs, and bit 15 ends the row. Gaps between runs are the only
+transparency: every value stored inside a run is artwork, including palette
+index zero.
+
+Cleaning is category-aware, because the same palette index means different
+things in different art. In sprite and building palettes, `247` is a
+transition and seam control and `248-250` are shadow bands; magenta key ramps
+are controls at any index. `251-254` are not universally reserved and are kept
+when they hold ordinary colours, as in the Gazebo's white highlights.
+Full-screen interface art, portraits, icons and effects use the high range as
+real colour and keep all of it.
+
+Two further cases are handled separately. Some indexed interface art declares
+index `255` transparent while also using it inside the picture, so only regions
+connected to the image edge stay transparent. And 16-bit RGB565 art has no
+transparency field at all, making `0x0000` ambiguous between pure black and a
+sprite cutout; it is resolved by category, so backgrounds keep their black and
+sprite layers keep their silhouette.
+
+See [docs/TILE_V3_RLE_ROOT_CAUSE.md](docs/TILE_V3_RLE_ROOT_CAUSE.md) for the
+evidence behind the exclusive-end reading.
+
+## Licence
+
+MIT, for the tooling. See [LICENSE](LICENSE). It grants nothing over Majesty
+Gold HD or its assets, which belong to their respective owners.

@@ -2,9 +2,14 @@
 
 ## Symptom
 
-Hero (and other) sprites extracted from `maindata.cam` looked horizontally sheared: floating limbs, stair-step silhouettes, and “garbage” frames that still used the right palette colors. The public extractor author’s reaction was that Majesty’s engine must be applying some unknown transform between the on-disk bytes and what you see in game.
+Hero and other sprites extracted from `maindata.cam` looked horizontally
+sheared: floating limbs, stair-step silhouettes, and frames that were plainly
+garbage yet still used exactly the right palette colours.
 
-That intuition was reasonable given the visuals, but wrong. The on-disk art is ordinary upright pixel art. The extractor was mis-placing every opaque run on the X axis.
+The natural reading is that the engine must apply some transform between the
+stored bytes and what appears on screen. It does not. The stored art is
+ordinary upright pixel art, and every opaque run was simply being placed at the
+wrong X.
 
 ## Short answer
 
@@ -108,19 +113,32 @@ Per row, repeat until `count_flags & 0x8000`:
   transparent index; applying sprite cleanup to them punches visible holes
   through faces and highlights. RGB565/RLE profile layers retain their authored
   transparency.
-- In sprite/building palettes, Phantom's Haunt confirmed `247` as a transition/seam control and `248–250` as shadow bands. Magenta key ramps are also controls regardless of index. Indices `251–254` are not universally reserved—the Gazebo palette uses them for white highlights—so they are retained when they are ordinary colors. Full-screen interface, profiles, icons, effects, and sepia palettes use the high range as artwork, so cleaning is category-aware rather than deleting it globally.
+- In sprite and building palettes, `247` is a transition and seam control and
+  `248–250` are shadow bands, confirmed by building custom art against the
+  engine and observing which indices it consumes rather than draws. Magenta key
+  ramps are controls at any index. Indices `251–254` are not universally
+  reserved: the Gazebo palette uses them for white highlights, so they are kept
+  when they hold ordinary colours. Full-screen interface art, profiles, icons,
+  effects and sepia palettes use the high range as artwork. Cleaning is
+  therefore category-aware rather than stripping the range globally.
 
-## Why “round-trip verified” looked fine before
+## Why a round-trip test does not catch this
 
-Encode and decode were **self-consistent** under the wrong start semantics:
+An encoder and decoder that share the wrong assumption agree with each other
+perfectly. Decode as a start, re-encode as a start, and the bytes match: the
+test passes and the picture is still wrong.
 
-1. Decode as start → wrong image.
-2. Re-encode that image writing start → different bytes from the original, or a wrong but stable representation.
-3. Simple tiles with **one opaque run per row** look identical under start vs exclusive-end (first run: start == end − count only if you already converted — for a single run, start-interpretation places at `x` while end-interpretation places at `x-count`; they only match if the stored field was already a start).
+Two things made it easy to miss further:
 
-More importantly: overlays / simple silhouettes with few multi-run rows could look acceptable in crude checks, while heroes and complex buildings (many multi-run rows) looked like garbage when *viewed* with start semantics. Injecting brand-new complex art with start-encoded X would not match what the engine draws.
+- A tile with **one opaque run per row** looks the same either way, so overlays
+  and simple silhouettes pass casual inspection. Only rows with several runs
+  shear, which is why heroes and detailed buildings looked like garbage while
+  simpler art seemed fine.
+- The colours are always right. Nothing about a sheared frame suggests a
+  geometry problem rather than an engine quirk.
 
-After the fix, decode converts end → start for callers; encode writes `x_end = start + count`. Pixel round-trip on AVB1 TILE 3794 succeeds.
+The check that does catch it compares against the source independently, which
+is what the extractor's occupancy audit does.
 
 ## How the decoder was validated
 
