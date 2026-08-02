@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import queue
 import shutil
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
@@ -974,7 +975,28 @@ class ExtractorApp:
         self.log.configure(state="disabled")
 
 
+MINIMUM_PYTHON = (3, 9)
+
+
 def main() -> int:
+    if sys.version_info < MINIMUM_PYTHON:
+        # Reached only when an older interpreter was picked; the launcher's
+        # own gate covers Python being absent entirely.
+        running = ".".join(str(part) for part in sys.version_info[:3])
+        needed = ".".join(str(part) for part in MINIMUM_PYTHON)
+        message = (
+            f"This tool needs Python {needed} or newer.\n\n"
+            f"It is running on Python {running} from:\n{sys.executable}\n\n"
+            "Install a current Python from python.org and run the tool again."
+        )
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Python is too old", message)
+        except tk.TclError:
+            print(message)
+        return 1
+
     enable_dpi_awareness()
     root = tk.Tk()
     ExtractorApp(root)

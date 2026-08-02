@@ -484,7 +484,19 @@ class ImagingTests(unittest.TestCase):
 
     def test_unknown_characters_do_not_crash(self):
         image = imaging.Image.new("RGBA", (40, 12), (0, 0, 0, 255))
-        imaging.ImageDraw.Draw(image).text((0, 0), "é中?", fill=(255, 255, 255, 255))
+        imaging.ImageDraw.Draw(image).text((0, 0), "é中", fill=(255, 255, 255, 255))
+
+    def test_the_font_covers_everything_the_tool_prints(self):
+        """A missing glyph draws a fallback box, which is how a comma went
+        unnoticed until it showed up as 17[]801 in a generated label."""
+        needed = (
+            "abcdefghijklmnopqrstuvwxyz"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "0123456789"
+            " .,:;-_/()[]'\"!?#%+=*&<>|@$~^\\"
+        )
+        missing = sorted(set(needed) - set(imaging._GLYPHS))
+        self.assertEqual(missing, [], f"glyphs missing from the bitmap font: {missing}")
 
 
 class FFmpegSupportTests(unittest.TestCase):

@@ -35,9 +35,14 @@ There isn't one. Unzip it and double-click `run_extractor.cmd`.
 .\run_extractor.cmd
 ```
 
-**Nothing to install, no pip, no virtual environment, no network.** The
-extractor runs on a stock Python 3.9+ install using only the standard library.
-If Python is missing, the launcher says so and points at the download.
+**No pip, no virtual environment, no network.** The extractor runs on a stock
+Python 3.9+ install using only the standard library.
+
+Python itself is the one prerequisite. If it is missing, the launcher shows a
+window explaining that and offering to install it, through Windows Package
+Manager where available and the official download page otherwise. Once Python
+is there the window never appears again. The extractor cannot present this
+itself, having no Python to run on.
 
 The one exception is **cinematics**. The game stores them as Bink video, a
 proprietary codec with no pure-Python decoder, so they need FFmpeg. That is a

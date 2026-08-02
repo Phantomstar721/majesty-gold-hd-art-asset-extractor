@@ -2427,7 +2427,20 @@ def format_bytes(size: int) -> str:
     return f"{value:.1f} TB"
 
 
+MINIMUM_PYTHON = (3, 9)
+
+
 def main() -> int:
+    if sys.version_info < MINIMUM_PYTHON:
+        running = ".".join(str(part) for part in sys.version_info[:3])
+        needed = ".".join(str(part) for part in MINIMUM_PYTHON)
+        print(
+            f"This tool needs Python {needed} or newer, but is running on {running}.\n"
+            f"  {sys.executable}\n"
+            "Install a current Python from https://www.python.org/downloads/windows/"
+        )
+        return 1
+
     parser = argparse.ArgumentParser(description="Extract local Majesty Gold HD art assets to PNG.")
     parser.add_argument("--game", type=Path, help="Majesty Gold HD install folder; auto-discovered if omitted")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output folder")
