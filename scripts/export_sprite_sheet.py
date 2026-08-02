@@ -14,10 +14,10 @@ import json
 import sys
 from pathlib import Path
 
-from PIL import Image
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
+
+from imaging import Image  # noqa: E402
 
 from extract_assets import (  # noqa: E402
     decode_tile_v3,

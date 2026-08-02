@@ -2,7 +2,7 @@
 /local/
 /output/
 /dist/
+/tools/
 *.zip
 __pycache__/
 *.pyc
-

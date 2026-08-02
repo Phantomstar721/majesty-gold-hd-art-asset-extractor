@@ -3,10 +3,10 @@ name = "majesty-gold-hd-art-asset-extractor"
 version = "0.3.0"
 description = "Local-only Majesty Gold HD art asset extractor and organizer."
 requires-python = ">=3.9"
-dependencies = [
-    "Pillow>=10",
-    "imageio-ffmpeg>=0.6",
-]
+# Deliberately empty. Everything runs on the standard library, so the tool can
+# be unzipped and run without pip or a network. Cinematics are Bink video and
+# need FFmpeg, which the tool offers to fetch only when the user asks for them.
+dependencies = []
 
 [tool.setuptools]
 py-modules = []

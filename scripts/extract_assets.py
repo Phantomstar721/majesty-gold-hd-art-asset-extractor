@@ -15,8 +15,8 @@ import time
 import xml.etree.ElementTree as ET
 from enum import Enum
 
-from PIL import Image
-import imageio_ffmpeg
+import ffmpeg_support
+from imaging import Image, ImageDraw
 
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
@@ -749,9 +749,15 @@ def tile_v1_to_image(
             pixels, width, height, row_stride, transparent_index
         )
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    # Written straight into the buffer. These loops run over every pixel of
+    # every tile in the game, and a per-pixel method call is the difference
+    # between a fast extraction and a slow one.
+    out = image.pixels
     for y in range(height):
+        row = y * row_stride
+        target = y * width * 4
         for x in range(width):
-            pixel_offset = y * row_stride + x
+            pixel_offset = row + x
             index = pixels[pixel_offset]
             if index == transparent_index and (
                 transparent_offsets is None or pixel_offset in transparent_offsets
@@ -760,7 +766,11 @@ def tile_v1_to_image(
             red, green, blue = palette[index]
             if clean_art and is_palette_key_color(index, red, green, blue):
                 continue
-            image.putpixel((x, y), (red, green, blue, 255))
+            offset = target + x * 4
+            out[offset] = red
+            out[offset + 1] = green
+            out[offset + 2] = blue
+            out[offset + 3] = 255
     bbox = image.getbbox()
     return image.crop(bbox) if bbox else image
 
@@ -786,17 +796,21 @@ def tile_v1_rgb565_to_image(
     black_is_transparent=False for background art to keep it whole.
     """
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    out = image.pixels
     pixels_start = 26
     for y in range(height):
         row_start = pixels_start + y * row_stride
+        target = y * width * 4
         for x in range(width):
-            value = u16(tile_data, row_start + x * 2)
+            low = tile_data[row_start + x * 2]
+            value = low | (tile_data[row_start + x * 2 + 1] << 8)
             if value == 0 and black_is_transparent:
                 continue
-            red = ((value >> 11) & 0x1F) * 255 // 31
-            green = ((value >> 5) & 0x3F) * 255 // 63
-            blue = (value & 0x1F) * 255 // 31
-            image.putpixel((x, y), (red, green, blue, 255))
+            offset = target + x * 4
+            out[offset] = ((value >> 11) & 0x1F) * 255 // 31
+            out[offset + 1] = ((value >> 5) & 0x3F) * 255 // 63
+            out[offset + 2] = (value & 0x1F) * 255 // 31
+            out[offset + 3] = 255
     if not black_is_transparent:
         # Every pixel is opaque, so a bbox crop would only ever be a no-op that
         # risks trimming legitimately black edges.
@@ -827,24 +841,32 @@ def tile_v3_to_image(
     if width <= 0 or height <= 0:
         return None
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    # Buffer writes rather than putpixel; the branch is hoisted out of the
+    # inner loop because it is constant for the whole tile.
+    out = image.pixels
+    sixteen_bit = int(decoded["pixel_size"]) == 2
     for y, segments in enumerate(decoded["rows"]):
+        row = y * width * 4
         for x_start, pixels in segments:
             for dx, index in enumerate(pixels):
                 x = x_start + dx
                 if x < 0 or x >= width:
                     continue
-                if int(decoded["pixel_size"]) == 2:
-                    red = ((index >> 11) & 0x1F) * 255 // 31
-                    green = ((index >> 5) & 0x3F) * 255 // 63
-                    blue = (index & 0x1F) * 255 // 31
-                    image.putpixel((x, y), (red, green, blue, 255))
+                offset = row + x * 4
+                if sixteen_bit:
+                    out[offset] = ((index >> 11) & 0x1F) * 255 // 31
+                    out[offset + 1] = ((index >> 5) & 0x3F) * 255 // 63
+                    out[offset + 2] = (index & 0x1F) * 255 // 31
                 elif palette:
                     red, green, blue = palette[index]
                     if clean_art and is_palette_key_color(index, red, green, blue):
                         continue
-                    image.putpixel((x, y), (red, green, blue, 255))
+                    out[offset] = red
+                    out[offset + 1] = green
+                    out[offset + 2] = blue
                 else:
-                    image.putpixel((x, y), (index, index, index, 255))
+                    out[offset] = out[offset + 1] = out[offset + 2] = index
+                out[offset + 3] = 255
     bbox = image.getbbox()
     return image.crop(bbox) if bbox else image
 
@@ -1375,44 +1397,65 @@ def bink_sample_frame_indices(data: bytes, sample_count: int = PRESENTATION_SAMP
     return sorted({round(index * (frame_count - 1) / (count - 1)) for index in range(count)})
 
 
-def decode_bink_samples(data: bytes) -> list[tuple[int, Image.Image]]:
-    """Decode evenly spaced Bink frames through imageio's bundled FFmpeg."""
+def bink_dimensions(data: bytes) -> tuple[int, int] | None:
+    """Frame size from the Bink header, needed to slice FFmpeg's raw output.
+
+    Offsets are relative to the whole PICT record, which prefixes the Bink
+    stream with four bytes, so the Bink magic sits at 4 and its width and
+    height fields at 24 and 28.
+    """
+    if len(data) < 32 or data[4:7] != b"BIK":
+        return None
+    width = u32(data, 24)
+    height = u32(data, 28)
+    if not (0 < width <= 8192 and 0 < height <= 8192):
+        return None
+    return width, height
+
+
+def decode_bink_samples(data: bytes, ffmpeg: Path) -> list[tuple[int, Image.Image]]:
+    """Decode evenly spaced Bink frames.
+
+    FFmpeg is asked for raw RGBA rather than PNG files: it skips an encode and
+    a decode, needs no temporary output files, and the bytes drop straight into
+    an image buffer.
+    """
     frame_indices = bink_sample_frame_indices(data)
-    if not frame_indices:
+    size = bink_dimensions(data)
+    if not frame_indices or size is None:
         return []
+    width, height = size
 
     with tempfile.TemporaryDirectory(prefix="majesty-art-") as temp_value:
-        temp = Path(temp_value)
-        source_path = temp / "source.bik"
+        source_path = Path(temp_value) / "source.bik"
         source_path.write_bytes(data[4:])  # PICT prepends a four-byte type value.
         expression = "+".join(f"eq(n\\,{frame})" for frame in frame_indices)
-        output_pattern = temp / "frame-%03d.png"
         command = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-v",
-            "error",
+            str(ffmpeg),
+            "-v", "error",
             "-y",
-            "-i",
-            str(source_path),
+            "-i", str(source_path),
             "-an",
-            "-vf",
-            f"select={expression}",
-            "-fps_mode",
-            "vfr",
-            str(output_pattern),
+            "-vf", f"select={expression}",
+            "-fps_mode", "vfr",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "-",
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = subprocess.run(command, capture_output=True, check=False)
         if result.returncode != 0:
-            raise RuntimeError(f"Could not decode Bink presentation art: {result.stderr.strip()}")
+            message = result.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(f"Could not decode Bink presentation art: {message}")
 
-        decoded: list[tuple[int, Image.Image]] = []
-        for sequence, frame_index in enumerate(frame_indices, start=1):
-            frame_path = temp / f"frame-{sequence:03d}.png"
-            if not frame_path.exists():
-                continue
-            with Image.open(frame_path) as image:
-                decoded.append((frame_index, image.convert("RGB")))
-        return decoded
+    frame_bytes = width * height * 4
+    decoded: list[tuple[int, Image.Image]] = []
+    for sequence, frame_index in enumerate(frame_indices):
+        start = sequence * frame_bytes
+        chunk = result.stdout[start : start + frame_bytes]
+        if len(chunk) < frame_bytes:
+            break
+        decoded.append((frame_index, Image(width, height, bytearray(chunk))))
+    return decoded
 
 
 def cinematic_soundtrack_path(game: Path, record_name: str) -> Path | None:
@@ -1428,7 +1471,9 @@ def cinematic_soundtrack_path(game: Path, record_name: str) -> Path | None:
     return soundtrack if soundtrack.is_file() else None
 
 
-def transcode_bink_video(data: bytes, output_path: Path, soundtrack_path: Path | None = None) -> None:
+def transcode_bink_video(
+    data: bytes, output_path: Path, ffmpeg: Path, soundtrack_path: Path | None = None
+) -> None:
     """Write an embedded Bink stream as a broadly playable, audible MP4."""
     if not bink_sample_frame_indices(data, sample_count=1):
         raise ValueError("PICT record does not contain a supported Bink stream")
@@ -1437,7 +1482,7 @@ def transcode_bink_video(data: bytes, output_path: Path, soundtrack_path: Path |
         source_path = Path(temp_value) / "source.bik"
         source_path.write_bytes(data[4:])
         command = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
+            str(ffmpeg),
             "-v",
             "error",
             "-y",
@@ -1477,7 +1522,6 @@ def transcode_bink_video(data: bytes, output_path: Path, soundtrack_path: Path |
 
 
 def make_presentation_contact_sheet(frames: list[tuple[int, Image.Image]]) -> Image.Image:
-    from PIL import ImageDraw
 
     thumb_width = 240
     label_height = 24
@@ -1509,9 +1553,22 @@ def export_presentation_art(
     manifest: list[dict[str, object]],
     *,
     keep_original_video: bool = False,
+    ffmpeg: Path | None = None,
 ) -> int:
+    """Export loading screens, and, when FFmpeg is available, video records.
+
+    Loading screens are a plain 15-bit raster this tool decodes itself. Maps,
+    segues and cinematics are Bink, so without FFmpeg they are skipped rather
+    than failing the run.
+    """
     written = 0
-    print("Extracting maps, cinematics, segues, and loading screens...", flush=True)
+    if ffmpeg is None:
+        print(
+            "Extracting loading screens (cinematics, maps and segues need FFmpeg)...",
+            flush=True,
+        )
+    else:
+        print("Extracting maps, cinematics, segues, and loading screens...", flush=True)
     for source_label, rel_path in PICTURE_CAM_SOURCES:
         path = game / rel_path
         if not path.exists():
@@ -1524,19 +1581,22 @@ def export_presentation_art(
             category = presentation_category(record.display_name)
             if category is None:
                 continue
-            record_dir = output_root / category / safe_name(f"{source_label}_{record.display_name}")
-            record_dir.mkdir(parents=True, exist_ok=True)
-
             if category == "loading_screens":
                 image = decode_splash_picture(record.data)
                 frames = [(0, image)] if image is not None else []
+            elif ffmpeg is None:
+                continue  # Bink record, and nothing here can read it.
             else:
-                frames = decode_bink_samples(record.data)
+                frames = decode_bink_samples(record.data, ffmpeg)
+
+            record_dir = output_root / category / safe_name(f"{source_label}_{record.display_name}")
+            record_dir.mkdir(parents=True, exist_ok=True)
 
             if category == "cinematics":
                 transcode_bink_video(
                     record.data,
                     record_dir / f"{safe_name(record.display_name)}.mp4",
+                    ffmpeg,
                     cinematic_soundtrack_path(game, record.display_name),
                 )
                 if keep_original_video:
@@ -1759,6 +1819,7 @@ def extract_assets(
     limit: int | None = None,
     *,
     clean_art: bool = True,
+    ffmpeg: Path | None = None,
 ) -> int:
     started = time.perf_counter()
     catalog = parse_catalog(game)
@@ -1835,7 +1896,11 @@ def extract_assets(
         output_root,
         manifest,
         keep_original_video=not clean_art,
+        ffmpeg=ffmpeg,
     )
+    if ffmpeg is None:
+        for line in ffmpeg_support.skip_notice():
+            print(line, flush=True)
 
     print("Auditing decoded TILE pixels against source runs...", flush=True)
     audited = audit_extracted_tile_occupancy(
@@ -2091,7 +2156,6 @@ def sprite_card(image: Image.Image, category: str) -> Image.Image:
     bg_color = (92, 110, 64, 255) if category.startswith("buildings/") else (28, 28, 28, 255)
     alt_color = (102, 122, 70, 255) if category.startswith("buildings/") else (36, 36, 36, 255)
     card = Image.new("RGBA", (image.width + pad * 2, image.height + pad * 2), bg_color)
-    from PIL import ImageDraw
 
     draw = ImageDraw.Draw(card)
     for y in range(0, card.height, 16):
@@ -2219,7 +2283,6 @@ def preview_cell_label(row: dict[str, object]) -> str:
 
 
 def draw_label(image: Image.Image, text: str, x: int, y: int) -> None:
-    from PIL import ImageDraw
 
     draw = ImageDraw.Draw(image)
     draw.text((x, y), text, fill=(230, 230, 230, 255))
@@ -2237,6 +2300,7 @@ def extract_mode(
     mode: ExtractionMode | str,
     *,
     limit: int | None = None,
+    ffmpeg: Path | None = None,
 ) -> int:
     """Extract using one of the three user-facing presets."""
     selected = ExtractionMode(mode)
@@ -2247,6 +2311,7 @@ def extract_mode(
         full=selected.exhaustive,
         limit=limit,
         clean_art=selected.clean_art,
+        ffmpeg=ffmpeg,
     )
 
 
@@ -2314,6 +2379,45 @@ def confirm_output_clear(output_root: Path, *, assume_yes: bool = False) -> bool
     return answer.strip().lower() in {"y", "yes"}
 
 
+def resolve_cli_ffmpeg(*, want_cinematics: bool, assume_yes: bool) -> Path | None:
+    """Work out which FFmpeg, if any, this command-line run should use.
+
+    An FFmpeg already on the machine is used without asking. A download only
+    happens when --cinematics was passed and the person at the keyboard says
+    yes, or when --yes made that decision in advance.
+    """
+    existing = ffmpeg_support.find_ffmpeg()
+    if existing is not None:
+        print(f"Using FFmpeg: {existing}", flush=True)
+        return existing
+    if not want_cinematics:
+        return None
+
+    def confirm(message: str) -> bool:
+        if assume_yes:
+            return True
+        if not sys.stdin or not sys.stdin.isatty():
+            print("\n" + message)
+            print("No console input available. Re-run with --yes to accept.")
+            return False
+        print("\n" + message)
+        try:
+            return input("[y/N] ").strip().lower() in {"y", "yes"}
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+
+    try:
+        return ffmpeg_support.resolve_ffmpeg(
+            allow_download=True,
+            confirm=confirm,
+            progress=lambda message: print(f"  {message}", flush=True),
+        )
+    except ffmpeg_support.FFmpegUnavailable as error:
+        print(f"\nFFmpeg could not be set up: {error}")
+        return None
+
+
 def format_bytes(size: int) -> str:
     value = float(max(0, size))
     for unit in ("bytes", "KB", "MB", "GB", "TB"):
@@ -2345,6 +2449,14 @@ def main() -> int:
         action="store_true",
         help="Skip the confirmation prompt shown before an existing output folder is cleared",
     )
+    parser.add_argument(
+        "--cinematics",
+        action="store_true",
+        help=(
+            "Include cinematics, maps and segues. These are Bink video and need "
+            "FFmpeg; if none is found you will be offered a download."
+        ),
+    )
     args = parser.parse_args()
 
     game = resolve_game_path(args.game)
@@ -2357,8 +2469,10 @@ def main() -> int:
         print("Cancelled. Nothing was changed.")
         return 1
 
+    ffmpeg = resolve_cli_ffmpeg(want_cinematics=args.cinematics, assume_yes=args.yes)
+
     mode = ExtractionMode.ALL_RAW if args.full else ExtractionMode(args.mode)
-    total = extract_mode(game, output, mode, limit=args.limit)
+    total = extract_mode(game, output, mode, limit=args.limit, ffmpeg=ffmpeg)
     print(f"Game folder: {game}")
     print(f"Extracted {total} PNG files to {output}")
     if args.zip:

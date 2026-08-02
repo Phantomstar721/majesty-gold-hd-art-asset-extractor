@@ -20,6 +20,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
+import ffmpeg_support
 from extract_assets import (
     DEFAULT_OUT,
     ExtractionMode,
@@ -142,8 +143,8 @@ class ExtractorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Majesty Gold HD Art Extractor")
-        self.root.geometry("1000x730")
-        self.root.minsize(940, 690)
+        self.root.geometry("1000x830")
+        self.root.minsize(940, 780)
         self.root.configure(background=COLORS["window"])
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -172,6 +173,10 @@ class ExtractorApp:
         self.game_status_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready to extract")
         self.details_button_var = tk.StringVar(value="Show technical details")
+        # Default on only when FFmpeg is already here, so the first run of a
+        # fresh copy never proposes a download the user did not ask about.
+        self.cinematics_var = tk.BooleanVar(value=ffmpeg_support.find_ffmpeg() is not None)
+        self.cinematics_detail_var = tk.StringVar(value="")
 
         self._configure_styles()
         self._build()
@@ -335,7 +340,7 @@ class ExtractorApp:
         outer = tk.Frame(self.root, background=COLORS["window"], padx=30, pady=16)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(7, weight=1)  # spacer row absorbs vertical growth
+        outer.rowconfigure(8, weight=1)  # spacer row absorbs vertical growth
 
         header = tk.Frame(outer, background=COLORS["window"])
         header.grid(row=0, column=0, sticky="ew")
@@ -479,8 +484,10 @@ class ExtractorApp:
         )
         self.size_detail.grid(row=1, column=1, sticky="w", pady=(2, 0))
 
+        self._build_cinematics_card(outer)
+
         activity = tk.Frame(outer, background=COLORS["window"])
-        activity.grid(row=6, column=0, sticky="ew")
+        activity.grid(row=7, column=0, sticky="ew")
         activity.columnconfigure(0, weight=1)
         self.status_label = tk.Label(
             activity,
@@ -512,7 +519,7 @@ class ExtractorApp:
         self._build_log_window()
 
         actions = tk.Frame(outer, background=COLORS["window"])
-        actions.grid(row=8, column=0, sticky="ew", pady=(14, 0))
+        actions.grid(row=9, column=0, sticky="ew", pady=(14, 0))
         actions.columnconfigure(0, weight=1)
         self.open_button = ttk.Button(
             actions, text="Open output folder", style="Secondary.TButton", command=self._open_output
@@ -525,6 +532,63 @@ class ExtractorApp:
             actions, text="Extract art", style="Primary.TButton", command=self._start_extract
         )
         self.extract_button.grid(row=0, column=2)
+
+    def _build_cinematics_card(self, outer: tk.Widget) -> None:
+        """Opt-in for the one thing that cannot be done with the standard library.
+
+        Cinematics, quest maps and segues are Bink video. Everything else here
+        runs with nothing installed, so this stays a deliberate choice rather
+        than a silent download.
+        """
+        card = self._card(outer, padx=18, pady=11)
+        card.grid(row=6, column=0, sticky="ew", pady=(0, 9))
+        card.columnconfigure(1, weight=1)
+
+        self.cinematics_check = tk.Checkbutton(
+            card,
+            text="Include cinematics, quest maps and segues",
+            variable=self.cinematics_var,
+            command=self._cinematics_changed,
+            background=COLORS["surface"],
+            foreground=COLORS["text"],
+            activebackground=COLORS["surface"],
+            activeforeground=COLORS["gold_lit"],
+            selectcolor=COLORS["input"],
+            font=(self.ui_family, 10, "bold"),
+            anchor="w",
+            cursor="hand2",
+        )
+        self.cinematics_check.grid(row=0, column=0, columnspan=2, sticky="w")
+        self.cinematics_detail = tk.Label(
+            card,
+            textvariable=self.cinematics_detail_var,
+            background=COLORS["surface"],
+            foreground=COLORS["muted"],
+            font=(self.ui_family, 9),
+            justify="left",
+            anchor="w",
+        )
+        self.cinematics_detail.grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        self._cinematics_changed()
+
+    def _cinematics_changed(self) -> None:
+        found = ffmpeg_support.find_ffmpeg()
+        if not self.cinematics_var.get():
+            self.cinematics_detail_var.set(
+                "Left off, the extractor needs nothing installed at all. "
+                "These records are Bink video and will be skipped."
+            )
+            self.cinematics_detail.configure(foreground=COLORS["muted"])
+        elif found is not None:
+            self.cinematics_detail_var.set(f"Using the FFmpeg already on this machine:  {found}")
+            self.cinematics_detail.configure(foreground=COLORS["success"])
+        else:
+            self.cinematics_detail_var.set(
+                f"FFmpeg is not on this machine. About {ffmpeg_support.FFMPEG_APPROX_MB} MB "
+                "will be downloaded when you start, after you confirm."
+            )
+            self.cinematics_detail.configure(foreground=COLORS["warning"])
+        self.refresh_estimate()
 
     def _build_log_window(self) -> None:
         self.log_window = tk.Toplevel(self.root)
@@ -767,6 +831,17 @@ class ExtractorApp:
             ):
                 return
 
+        # Settled before the worker starts so the download prompt happens on
+        # the UI thread, where a dialog belongs.
+        ffmpeg = self._resolve_ffmpeg()
+        if ffmpeg is None and self.cinematics_var.get():
+            if not messagebox.askyesno(
+                "Continue without cinematics?",
+                "Cinematics, quest maps and segues will be skipped.\n\n"
+                "Everything else extracts normally. Continue?",
+            ):
+                return
+
         self.running = True
         self._set_inputs_enabled(False)
         self.progress.configure(value=0)
@@ -774,7 +849,22 @@ class ExtractorApp:
         self.status_label.configure(foreground=COLORS["gold"])
         self._append_log("\n— Starting extraction —\n")
         mode = ExtractionMode(self.mode_var.get())
-        threading.Thread(target=self._extract_worker, args=(game, output, mode), daemon=True).start()
+        threading.Thread(
+            target=self._extract_worker, args=(game, output, mode, ffmpeg), daemon=True
+        ).start()
+
+    def _resolve_ffmpeg(self) -> Path | None:
+        if not self.cinematics_var.get():
+            return None
+        try:
+            return ffmpeg_support.resolve_ffmpeg(
+                allow_download=True,
+                confirm=lambda message: messagebox.askyesno("Download FFmpeg?", message),
+                progress=self._append_log,
+            )
+        except ffmpeg_support.FFmpegUnavailable as error:
+            messagebox.showerror("FFmpeg could not be set up", str(error))
+            return None
 
     def _set_inputs_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -788,12 +878,15 @@ class ExtractorApp:
         # show a selection that does not match the run in progress.
         for radio in self.mode_radios.values():
             radio.configure(state=state)
+        self.cinematics_check.configure(state=state)
 
-    def _extract_worker(self, game: Path, output: Path, mode: ExtractionMode) -> None:
+    def _extract_worker(
+        self, game: Path, output: Path, mode: ExtractionMode, ffmpeg: Path | None
+    ) -> None:
         writer = QueueWriter(self.messages)
         try:
             with redirect_stdout(writer), redirect_stderr(writer):
-                total = extract_mode(game, output, mode)
+                total = extract_mode(game, output, mode, ffmpeg=ffmpeg)
             self.messages.put(("done", (total, output)))
         except Exception as exc:  # GUI boundary: report errors instead of disappearing.
             self.messages.put(("error", str(exc)))

@@ -4,10 +4,14 @@ import struct
 import sys
 import tempfile
 import unittest
+import zlib
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+
+import ffmpeg_support  # noqa: E402
+import imaging  # noqa: E402
 
 from extract_assets import (  # noqa: E402
     CamEntry,
@@ -360,6 +364,167 @@ class GameDiscoveryTests(unittest.TestCase):
 
     def test_missing_manifest_is_not_an_error(self):
         self.assertIsNone(steam_installdir(Path("nope") / "appmanifest_73230.acf"))
+
+
+class ImagingTests(unittest.TestCase):
+    """The standard-library replacement for the slice of Pillow we used."""
+
+    def test_png_round_trips_through_our_own_codec(self):
+        image = imaging.Image.new("RGBA", (4, 3), (0, 0, 0, 0))
+        image.putpixel((0, 0), (255, 0, 0, 255))
+        image.putpixel((3, 2), (0, 128, 255, 128))
+        decoded = imaging.decode_png(imaging.encode_png(image))
+        self.assertEqual(decoded.size, (4, 3))
+        self.assertEqual(decoded.getpixel((0, 0)), (255, 0, 0, 255))
+        self.assertEqual(decoded.getpixel((3, 2)), (0, 128, 255, 128))
+        self.assertEqual(decoded.getpixel((1, 1)), (0, 0, 0, 0))
+
+    def test_png_survives_a_file_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "x.png"
+            image = imaging.Image.new("RGBA", (2, 2), (10, 20, 30, 255))
+            image.save(path)
+            self.assertEqual(path.read_bytes()[:8], imaging.PNG_SIGNATURE)
+            self.assertEqual(imaging.Image.open(path).tobytes(), image.tobytes())
+
+    def test_every_png_filter_type_decodes(self):
+        """Our writer only emits filter 0, but FFmpeg and other tools do not."""
+        for filter_type in range(5):
+            width, height = 3, 2
+            raw = bytearray()
+            for y in range(height):
+                raw.append(filter_type)
+                raw += bytes([0] * (width * 4)) if filter_type else bytes(
+                    [9, 8, 7, 255] * width
+                )
+            body = zlib.compress(bytes(raw))
+
+            def chunk(tag: bytes, payload: bytes) -> bytes:
+                return (
+                    struct.pack(">I", len(payload))
+                    + tag
+                    + payload
+                    + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+                )
+
+            data = (
+                imaging.PNG_SIGNATURE
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", body)
+                + chunk(b"IEND", b"")
+            )
+            self.assertEqual(imaging.decode_png(data).size, (width, height), filter_type)
+
+    def test_getbbox_finds_the_tight_box(self):
+        image = imaging.Image.new("RGBA", (6, 5), (0, 0, 0, 0))
+        image.putpixel((2, 1), (1, 2, 3, 255))
+        image.putpixel((4, 3), (1, 2, 3, 255))
+        self.assertEqual(image.getbbox(), (2, 1, 5, 4))
+
+    def test_getbbox_is_none_when_nothing_is_visible(self):
+        self.assertIsNone(imaging.Image.new("RGBA", (3, 3), (0, 0, 0, 0)).getbbox())
+
+    def test_crop_takes_the_requested_window(self):
+        image = imaging.Image.new("RGBA", (4, 4), (0, 0, 0, 255))
+        image.putpixel((2, 2), (9, 9, 9, 255))
+        cropped = image.crop((1, 1, 3, 3))
+        self.assertEqual(cropped.size, (2, 2))
+        self.assertEqual(cropped.getpixel((1, 1)), (9, 9, 9, 255))
+
+    def test_alpha_composite_blends_and_respects_transparency(self):
+        base = imaging.Image.new("RGBA", (2, 1), (0, 0, 0, 255))
+        top = imaging.Image.new("RGBA", (2, 1), (0, 0, 0, 0))
+        top.putpixel((0, 0), (255, 255, 255, 255))
+        base.alpha_composite(top)
+        self.assertEqual(base.getpixel((0, 0)), (255, 255, 255, 255))
+        self.assertEqual(base.getpixel((1, 0)), (0, 0, 0, 255))
+
+    def test_nearest_resize_keeps_hard_edges(self):
+        image = imaging.Image.new("RGBA", (2, 1), (0, 0, 0, 255))
+        image.putpixel((1, 0), (255, 255, 255, 255))
+        scaled = image.resize((4, 2), imaging.Resampling.NEAREST)
+        self.assertEqual(scaled.size, (4, 2))
+        self.assertEqual(scaled.getpixel((0, 0)), (0, 0, 0, 255))
+        self.assertEqual(scaled.getpixel((3, 1)), (255, 255, 255, 255))
+
+    def test_thumbnail_only_shrinks_and_keeps_aspect(self):
+        image = imaging.Image.new("RGBA", (100, 50), (1, 2, 3, 255))
+        image.thumbnail((50, 50))
+        self.assertEqual(image.size, (50, 25))
+        image.thumbnail((999, 999))
+        self.assertEqual(image.size, (50, 25))
+
+    def test_fifteen_bit_bgr_decodes(self):
+        """The "BGR" in BGR;15 is byte order, not bit order.
+
+        Bits 14-10 are red, 9-5 green, 4-0 blue. Reading the name as bit order
+        gets the channels backwards, which is worth pinning: these values were
+        checked against Pillow's own BGR;15 decoder and match on all four.
+        """
+        for value, expected in (
+            (0x7C00, (255, 0, 0, 255)),
+            (0x03E0, (0, 255, 0, 255)),
+            (0x001F, (0, 0, 255, 255)),
+            (0x7FFF, (255, 255, 255, 255)),
+        ):
+            image = imaging.Image.frombytes("RGB", (1, 1), struct.pack("<H", value), "raw", "BGR;15")
+            self.assertEqual(image.getpixel((0, 0)), expected, hex(value))
+
+    def test_flip_top_bottom(self):
+        image = imaging.Image.new("RGBA", (1, 2), (0, 0, 0, 255))
+        image.putpixel((0, 0), (255, 0, 0, 255))
+        flipped = image.transpose(imaging.Transpose.FLIP_TOP_BOTTOM)
+        self.assertEqual(flipped.getpixel((0, 1)), (255, 0, 0, 255))
+
+    def test_text_draws_something_legible(self):
+        image = imaging.Image.new("RGBA", (60, 12), (0, 0, 0, 255))
+        imaging.ImageDraw.Draw(image).text((1, 2), "Stand d2", fill=(255, 255, 255, 255))
+        lit = sum(1 for pixel in image.getdata() if pixel[:3] == (255, 255, 255))
+        self.assertGreater(lit, 20)
+
+    def test_unknown_characters_do_not_crash(self):
+        image = imaging.Image.new("RGBA", (40, 12), (0, 0, 0, 255))
+        imaging.ImageDraw.Draw(image).text((0, 0), "é中?", fill=(255, 255, 255, 255))
+
+
+class FFmpegSupportTests(unittest.TestCase):
+    def test_nothing_is_downloaded_unless_asked(self):
+        self.assertIsNone(
+            ffmpeg_support.resolve_ffmpeg(
+                allow_download=False,
+                confirm=lambda _message: self.fail("must not prompt"),
+            )
+            if ffmpeg_support.find_ffmpeg() is None
+            else None
+        )
+
+    def test_declining_the_prompt_skips_cinematics(self):
+        if ffmpeg_support.find_ffmpeg() is not None:
+            self.skipTest("FFmpeg is installed on this machine")
+        self.assertIsNone(
+            ffmpeg_support.resolve_ffmpeg(allow_download=True, confirm=lambda _message: False)
+        )
+
+    def test_the_prompt_names_the_source_and_destination(self):
+        message = ffmpeg_support.describe_download()
+        self.assertIn(ffmpeg_support.FFMPEG_URL, message)
+        self.assertIn(str(ffmpeg_support.FFMPEG_DIR), message)
+        self.assertTrue(ffmpeg_support.FFMPEG_URL.startswith("https://"))
+
+    def test_an_explicit_override_is_honoured(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fake = Path(temp) / "ffmpeg.exe"
+            fake.write_bytes(b"")
+            previous = os.environ.get("MAJESTY_FFMPEG")
+            os.environ["MAJESTY_FFMPEG"] = str(fake)
+            try:
+                if not ffmpeg_support.FFMPEG_EXE.is_file():
+                    self.assertEqual(ffmpeg_support.find_ffmpeg(), fake)
+            finally:
+                if previous is None:
+                    os.environ.pop("MAJESTY_FFMPEG", None)
+                else:
+                    os.environ["MAJESTY_FFMPEG"] = previous
 
 
 def _tile_v3(*, x_end: int, pixels: bytes, flags: int) -> bytes:
