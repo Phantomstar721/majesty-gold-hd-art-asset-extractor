@@ -1,8 +1,10 @@
 /.venv/
+/.venv-build/
 /local/
 /output/
 /dist/
 /tools/
+/.tmp/
 *.zip
 __pycache__/
 *.pyc

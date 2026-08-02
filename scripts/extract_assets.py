@@ -16,10 +16,11 @@ import xml.etree.ElementTree as ET
 from enum import Enum
 
 import ffmpeg_support
+from app_paths import tool_root
 from imaging import Image, ImageDraw
 
 
-TOOL_ROOT = Path(__file__).resolve().parents[1]
+TOOL_ROOT = tool_root()
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Majesty HD")
 DEFAULT_OUT = TOOL_ROOT / "output" / "assets"
 

@@ -19,7 +19,9 @@ import zipfile
 from pathlib import Path
 from typing import Callable, Iterable
 
-TOOL_ROOT = Path(__file__).resolve().parents[1]
+from app_paths import tool_root
+
+TOOL_ROOT = tool_root()
 FFMPEG_DIR = TOOL_ROOT / "tools" / "ffmpeg"
 FFMPEG_EXE = FFMPEG_DIR / "ffmpeg.exe"
 
