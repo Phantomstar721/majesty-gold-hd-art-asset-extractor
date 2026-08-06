@@ -11,8 +11,8 @@ to yourself unless you have permission to share it.
 
 ## Getting started
 
-Download `Majesty Art Extractor.exe`, put it in a folder of its own, and
-double-click it.
+Download [`Majesty Art Extractor.exe`](Majesty%20Art%20Extractor.exe?raw=1),
+put it in a folder of its own, and double-click it.
 
 **Nothing to install.** No Python, no pip, no setup. Everything the tool needs
 is inside that one file.
