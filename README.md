@@ -11,7 +11,7 @@ to yourself unless you have permission to share it.
 
 ## Getting started
 
-[Download `Majesty Art Extractor.exe`](https://github.com/Phantomstar721/majesty-gold-hd-art-asset-extractor/releases/latest/download/Majesty%20Art%20Extractor.exe),
+[Download `Majesty Art Extractor.exe`](https://github.com/Phantomstar721/majesty-gold-hd-art-asset-extractor/releases/latest/download/Majesty.Art.Extractor.exe),
 put it in a folder of its own, and double-click it.
 
 **Nothing to install.** No Python, no pip, no setup. Everything the tool needs

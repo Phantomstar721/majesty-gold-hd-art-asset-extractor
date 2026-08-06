@@ -35,19 +35,20 @@ jobs:
         shell: pwsh
         run: .\scripts\Build-Exe.ps1
 
-      - name: Write SHA-256 checksum
+      - name: Prepare release assets
         shell: pwsh
         run: |
-          $hash = (Get-FileHash -LiteralPath "dist\Majesty Art Extractor.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content -LiteralPath "dist\Majesty Art Extractor.exe.sha256" -Encoding ASCII -Value "$hash  Majesty Art Extractor.exe"
+          Copy-Item -LiteralPath "dist\Majesty Art Extractor.exe" -Destination "dist\Majesty.Art.Extractor.exe"
+          $hash = (Get-FileHash -LiteralPath "dist\Majesty.Art.Extractor.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "dist\Majesty.Art.Extractor.exe.sha256" -Encoding ASCII -Value "$hash  Majesty.Art.Extractor.exe"
 
       - name: Preserve workflow artifact
         uses: actions/upload-artifact@v7
         with:
           name: majesty-art-extractor-windows
           path: |
-            dist/Majesty Art Extractor.exe
-            dist/Majesty Art Extractor.exe.sha256
+            dist/Majesty.Art.Extractor.exe
+            dist/Majesty.Art.Extractor.exe.sha256
           if-no-files-found: error
 
       - name: Publish tagged GitHub release
@@ -57,8 +58,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ github.ref_name }}" `
-            "dist\Majesty Art Extractor.exe" `
-            "dist\Majesty Art Extractor.exe.sha256" `
+            "dist\Majesty.Art.Extractor.exe" `
+            "dist\Majesty.Art.Extractor.exe.sha256" `
             --verify-tag `
             --title "Majesty Gold HD Art Extractor ${{ github.ref_name }}" `
             --generate-notes
