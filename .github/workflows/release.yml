@@ -1,0 +1,64 @@
+name: Build standalone release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-executable:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        run: python -m unittest discover -s tests
+
+      - name: Create isolated build environment
+        shell: pwsh
+        run: |
+          python -m venv .venv-build
+          .\.venv-build\Scripts\python.exe -m pip install --disable-pip-version-check --quiet "pyinstaller==6.21.0"
+
+      - name: Build standalone executable
+        shell: pwsh
+        run: .\scripts\Build-Exe.ps1
+
+      - name: Write SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -LiteralPath "dist\Majesty Art Extractor.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "dist\Majesty Art Extractor.exe.sha256" -Encoding ASCII -Value "$hash  Majesty Art Extractor.exe"
+
+      - name: Preserve workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: majesty-art-extractor-windows
+          path: |
+            dist/Majesty Art Extractor.exe
+            dist/Majesty Art Extractor.exe.sha256
+          if-no-files-found: error
+
+      - name: Publish tagged GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "dist\Majesty Art Extractor.exe" `
+            "dist\Majesty Art Extractor.exe.sha256" `
+            --verify-tag `
+            --title "Majesty Gold HD Art Extractor ${{ github.ref_name }}" `
+            --generate-notes

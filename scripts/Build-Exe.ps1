@@ -19,6 +19,7 @@
 #>
 param(
     [string]$OutputDir = "",
+    [string]$PyInstallerVersion = "6.21.0",
     [switch]$KeepBuildFiles
 )
 
@@ -67,9 +68,13 @@ if (-not (Test-Path (Join-Path $BuildVenv "Scripts\python.exe"))) {
 }
 $BuildPython = Join-Path $BuildVenv "Scripts\python.exe"
 
-if ((Invoke-Native -FilePath $BuildPython -Arguments @("-c", "import PyInstaller") -Quiet) -ne 0) {
-    Write-Host "Installing PyInstaller into the build environment..."
-    $install = @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "pyinstaller")
+$installedPyInstaller = (& $BuildPython -c "import PyInstaller; print(PyInstaller.__version__)" 2>$null | Select-Object -Last 1)
+if ($LASTEXITCODE -ne 0 -or $installedPyInstaller -ne $PyInstallerVersion) {
+    Write-Host "Installing PyInstaller $PyInstallerVersion into the build environment..."
+    $install = @(
+        "-m", "pip", "install", "--disable-pip-version-check", "--quiet",
+        "pyinstaller==$PyInstallerVersion"
+    )
     if ((Invoke-Native -FilePath $BuildPython -Arguments $install -Quiet) -ne 0) {
         throw "Could not install PyInstaller."
     }

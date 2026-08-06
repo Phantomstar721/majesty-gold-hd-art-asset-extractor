@@ -11,8 +11,8 @@ to yourself unless you have permission to share it.
 
 ## Getting started
 
-Download `Majesty Art Extractor.exe`, put it in a folder of its own, and
-double-click it.
+[Download `Majesty Art Extractor.exe`](https://github.com/Phantomstar721/majesty-gold-hd-art-asset-extractor/releases/latest/download/Majesty%20Art%20Extractor.exe),
+put it in a folder of its own, and double-click it.
 
 **Nothing to install.** No Python, no pip, no setup. Everything the tool needs
 is inside that one file.
@@ -210,6 +210,26 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Build-Exe.ps1
 PyInstaller is installed into a separate `.venv-build`, so `.venv` stays a
 faithful test of the no-dependencies claim. FFmpeg is deliberately not bundled:
 it is larger than everything else combined and only two categories need it.
+The PyInstaller version is pinned by the build script. Pushing a `v*.*.*` tag
+runs the Windows build and tests on GitHub, publishes the EXE and its SHA-256
+checksum as a GitHub Release, and also retains them as a workflow artifact.
+
+### Preparing the Steam Workshop upload
+
+Build the standalone executable and a clean RGSeditor upload project with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-WorkshopPackage.ps1 -PreviewImagePath .\local\image.jpg
+```
+
+The generated `dist\workshop-upload\content` directory contains exactly the
+two files subscribers receive: `Majesty Art Extractor.exe` and `START HERE.txt`.
+The `.mswproj`, preview image and SHA-256 checksum sit one directory above it,
+outside RGSeditor's `ContentPath`, so they are not included in the subscriber
+download. Open `dist\workshop-upload\Majesty Art Extractor.mswproj` in
+RGSeditor to create or update the Workshop item. New projects use Workshop ID
+`0` and private visibility; pass `-WorkshopId ID` when rebuilding an existing
+item.
 
 ### TILE format
 
