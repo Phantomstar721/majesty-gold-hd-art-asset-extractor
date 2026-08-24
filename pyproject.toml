@@ -1,6 +1,6 @@
 [project]
 name = "majesty-gold-hd-art-asset-extractor"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local-only Majesty Gold HD art asset extractor and organizer."
 requires-python = ">=3.9"
 # Deliberately empty. Everything runs on the standard library, so the tool can

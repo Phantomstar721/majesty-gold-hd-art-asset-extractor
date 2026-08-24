@@ -73,8 +73,8 @@ anywhere.
 
 ```text
 output/assets/
-  heroes/sprites/          monsters/sprites/
-  buildings/sprites/       buildings/lairs/
+  heroes/sprites/<source>/          monsters/sprites/<source>/
+  buildings/sprites/<source>/       buildings/lairs/<source>/
   spell_effects/
   icons/heroes/            icons/monsters/      icons/buildings/
   icons/weapons/           icons/armor/         icons/items/     icons/spells/
@@ -85,9 +85,11 @@ output/assets/
   _manifest.csv
 ```
 
-Every record gets its own folder. Animation frames are named with the
-animation, direction, frame number and the source tile they came from, so a
-file can always be traced back.
+Every source archive gets its own folder before the record folders. TILE
+numbers are local to one archive, so this prevents a base-game image and an
+expansion image with the same number from overwriting each other. Animation
+frames are named with the animation, direction, stream (when coupled), frame
+number and source tile, so a file can always be traced back.
 
 `_previews/` holds contact sheets for the sprite-heavy records. They are not
 in-game reconstructions; they enlarge a few representative frames so you can
@@ -237,6 +239,11 @@ sprite layers keep their silhouette.
 
 See [docs/TILE_V3_RLE_ROOT_CAUSE.md](docs/TILE_V3_RLE_ROOT_CAUSE.md) for the
 evidence behind the exclusive-end reading.
+
+IMAG animation structure is likewise read from its declared direction, frame
+and coupled-stream counts instead of inferred from spacing. See
+[docs/IMAG_DESCRIPTOR_ROOT_CAUSE.md](docs/IMAG_DESCRIPTOR_ROOT_CAUSE.md) for
+the stock trace and the six-versus-eight root cause.
 
 ## License
 

@@ -115,6 +115,7 @@ def main() -> int:
     parser.add_argument("--cam", type=Path, default=None, help="Override maindata.cam path")
     parser.add_argument("--record", required=True, help="IMAG record prefix, e.g. AVB1")
     parser.add_argument("--set", default="Stand", help="Image set name or numeric setID (default Stand)")
+    parser.add_argument("--stream", type=int, default=0, help="Coupled stream to export (default body stream 0)")
     parser.add_argument("--out", type=Path, required=True, help="Output folder")
     parser.add_argument(
         "--keep-shadow",
@@ -157,9 +158,15 @@ def main() -> int:
         return 1
 
     set_id, set_name, rel_off = chosen
-    directions = parse_directional_frame_descriptor(entry.data, rel_off)
+    set_index = anim_sets.index(chosen)
+    next_off = anim_sets[set_index + 1][2] if set_index + 1 < len(anim_sets) else len(entry.data)
+    directions = parse_directional_frame_descriptor(entry.data, rel_off, next_off)
     if not directions:
         print("No directional frames parsed for that set")
+        return 1
+    if args.stream < 0 or any(args.stream >= int(direction["stream_count"]) for direction in directions):
+        available = min(int(direction["stream_count"]) for direction in directions)
+        print(f"Stream {args.stream} is unavailable; this set has {available} stream(s)")
         return 1
 
     # Collect rendered frames and geometry
@@ -168,7 +175,8 @@ def main() -> int:
         slot = int(direction["slot"])
         x_off = int(direction["x_off"])
         y_off = int(direction["y_off"])
-        for frame_idx, tile_index in enumerate(direction["tile_indices"]):
+        stream = direction["streams"][args.stream]
+        for frame_idx, tile_index in enumerate(stream["tile_indices"]):
             if tile_index < 0 or tile_index >= len(tile.entries):
                 continue
             tile_data = tile.entries[tile_index].data
@@ -239,6 +247,7 @@ def main() -> int:
         "anchor_x": anchor_x,
         "anchor_y": anchor_y,
         "keep_shadow": bool(args.keep_shadow),
+        "stream": args.stream,
         "sheet_png": sheet_path.name,
         "frames": [
             {

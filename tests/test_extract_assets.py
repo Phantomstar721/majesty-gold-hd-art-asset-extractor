@@ -29,6 +29,7 @@ from extract_assets import (  # noqa: E402
     is_inside,
     is_palette_key_color,
     estimate_output_size,
+    parse_directional_frame_descriptor,
     presentation_category,
     preview_cell_label,
     edge_connected_index_offsets,
@@ -42,6 +43,7 @@ from extract_assets import (  # noqa: E402
     tile_v1_to_image,
     tile_to_category_image,
     validate_output_root,
+    write_images,
 )
 
 
@@ -100,6 +102,41 @@ class TileV3Tests(unittest.TestCase):
             expected_tile_opaque_pixels(tile, palette, "buildings/sprites", clean_art=True),
             2,
         )
+
+
+class ImagDescriptorTests(unittest.TestCase):
+    def test_stock_direction_count_and_explicit_frame_count_are_authoritative(self):
+        blob, set_start, set_end = _directional_set(direction_count=8, frame_count=6)
+
+        directions = parse_directional_frame_descriptor(blob, set_start, set_end)
+
+        self.assertEqual(len(directions), 8)
+        self.assertEqual([direction["slot"] for direction in directions], list(range(8)))
+        self.assertEqual([direction["frame_count"] for direction in directions], [6] * 8)
+        self.assertTrue(all(len(direction["tile_indices"]) == 6 for direction in directions))
+
+    def test_frame_table_is_anchored_from_block_end_and_keeps_coupled_streams(self):
+        blob, set_start, set_end = _directional_set(
+            direction_count=1,
+            frame_count=3,
+            stream_count=2,
+            control_word_count=11,
+        )
+
+        [direction] = parse_directional_frame_descriptor(blob, set_start, set_end)
+
+        self.assertEqual(direction["stream_count"], 2)
+        self.assertEqual(len(direction["control_words"]), 11)
+        self.assertEqual(direction["streams"][0]["tile_indices"], [100, 101, 102])
+        self.assertEqual(direction["streams"][1]["tile_indices"], [110, 111, 112])
+
+    def test_tile_reference_flags_do_not_turn_the_index_out_of_range(self):
+        blob, set_start, set_end = _directional_set(direction_count=1, frame_count=2)
+
+        [direction] = parse_directional_frame_descriptor(blob, set_start, set_end)
+
+        self.assertEqual(direction["streams"][0]["reference_words"][1], 0xABCD0065)
+        self.assertEqual(direction["tile_indices"], [100, 101])
 
 
 class ExtractionModeTests(unittest.TestCase):
@@ -230,6 +267,31 @@ class PresentationArtTests(unittest.TestCase):
         self.assertEqual(sprite.getpixel((1, 1))[3], 0)
         self.assertEqual(sprite.getpixel((2, 1))[3], 0)
 
+    def test_untouched_colours_keeps_every_stored_dense_pixel(self):
+        width, height = 3, 1
+        palette_offset = 26 + width * height
+        tile = bytearray(palette_offset + 1032)
+        struct.pack_into("<HHHH", tile, 0, 1, height, width, width)
+        struct.pack_into("<H", tile, 16, 255)
+        struct.pack_into("<H", tile, 20, 1)
+        struct.pack_into("<I", tile, 22, palette_offset)
+        tile[26 : 26 + width] = bytes((248, 250, 255))
+        for index, color in {248: (171, 174, 182), 250: (33, 41, 66), 255: (0, 0, 0)}.items():
+            start = palette_offset + 8 + index * 4
+            tile[start : start + 4] = bytes((*color, 0))
+
+        raw = tile_to_category_image(bytes(tile), None, "heroes/sprites", clean_art=False)
+        clean = tile_to_category_image(bytes(tile), None, "heroes/sprites", clean_art=True)
+
+        self.assertEqual(list(raw.getchannel("A").getdata()), [255, 255, 255])
+        self.assertTrue(all(alpha == 0 for alpha in clean.getchannel("A").getdata()))
+        self.assertEqual(
+            expected_tile_opaque_pixels(
+                bytes(tile), None, "heroes/sprites", clean_art=False
+            ),
+            3,
+        )
+
 
 class OutputSafetyTests(unittest.TestCase):
     """The output folder is wiped with rmtree, so this guard is the only thing
@@ -338,6 +400,34 @@ class OutputSafetyTests(unittest.TestCase):
         self.assertFalse(is_inside(Path(r"C:\Games\Majesty HD2"), Path(r"C:\Games\Majesty HD")))
 
 
+class OutputIdentityTests(unittest.TestCase):
+    def test_archive_local_tile_numbers_cannot_overwrite_each_other(self):
+        with tempfile.TemporaryDirectory() as temp_value:
+            output = Path(temp_value)
+            record = CamEntry(b"CUR1Tactical Cursor".ljust(20, b"\0"), b"", 0)
+            manifest: list[dict[str, object]] = []
+            image = imaging.Image.new("RGBA", (1, 1), (1, 2, 3, 255))
+
+            for source in ("base", "expansion"):
+                write_images(
+                    source,
+                    record,
+                    "other/interface",
+                    None,
+                    "Interface",
+                    [(3, image)],
+                    output,
+                    manifest,
+                    "CUR1_Tactical_Cursor",
+                )
+
+            paths = [str(row["png"]) for row in manifest]
+            self.assertEqual(len(paths), len(set(paths)))
+            self.assertTrue(all((output / path).is_file() for path in paths))
+            self.assertIn("/base/", f"/{paths[0]}")
+            self.assertIn("/expansion/", f"/{paths[1]}")
+
+
 class Rgb565BackgroundTests(unittest.TestCase):
     """RGB565 has no alpha, so 0x0000 is both pure black and the sprite cutout.
 
@@ -392,6 +482,12 @@ class PreviewLabelTests(unittest.TestCase):
 
     def test_non_directional_rows_stay_short(self):
         self.assertEqual(preview_cell_label({"set": "Active", "direction": "", "frame": "1"}), "Active f1")
+
+    def test_secondary_stream_is_labelled(self):
+        self.assertEqual(
+            preview_cell_label({"set": "Cast", "direction": "3", "stream": "1", "frame": "2"}),
+            "Cast d3 s1 f2",
+        )
 
     def test_empty_row_still_gets_a_label(self):
         self.assertEqual(preview_cell_label({}), "frame")
@@ -772,6 +868,39 @@ class FFmpegSupportTests(unittest.TestCase):
             sys.stdin = original_stdin
 
         self.assertEqual(calls, [False, True])
+
+
+def _directional_set(
+    *,
+    direction_count: int,
+    frame_count: int,
+    stream_count: int = 1,
+    control_word_count: int = 8,
+) -> tuple[bytes, int, int]:
+    set_start = 24
+    descriptor_size = 0x40 + direction_count * 4
+    block_size = 8 + control_word_count * 4 + frame_count * stream_count * 8
+    set_end = set_start + descriptor_size + direction_count * block_size
+    blob = bytearray(set_end)
+    struct.pack_into("<I", blob, set_start, direction_count)
+
+    for direction in range(direction_count):
+        relative = descriptor_size + direction * block_size
+        struct.pack_into("<I", blob, set_start + 0x40 + direction * 4, relative)
+        block_start = set_start + relative
+        struct.pack_into("<hh", blob, block_start, direction - 4, direction + 2)
+        struct.pack_into("<I", blob, block_start + 4, (frame_count << 16) | stream_count)
+        for control in range(control_word_count):
+            struct.pack_into("<I", blob, block_start + 8 + control * 4, 0xC000 + control)
+        frame_start = block_start + 8 + control_word_count * 4
+        for stream in range(stream_count):
+            for frame in range(frame_count):
+                pair = frame_start + (stream * frame_count + frame) * 8
+                struct.pack_into("<I", blob, pair, 0xD000 + frame)
+                flags = 0xABCD if direction == 0 and stream == 0 and frame == 1 else 0
+                tile_index = 100 + stream * 10 + frame
+                struct.pack_into("<I", blob, pair + 4, (flags << 16) | tile_index)
+    return bytes(blob), set_start, set_end
 
 
 def _tile_v3(*, x_end: int, pixels: bytes, flags: int) -> bytes:

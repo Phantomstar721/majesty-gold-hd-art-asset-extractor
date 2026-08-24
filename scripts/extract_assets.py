@@ -49,9 +49,10 @@ MODE_LABELS = {
 MAGIC = b"CYLBPC  \x01\x00\x01\x00"
 ANIM_HEADER_SIZE = 0x14
 IMAGE_SET_ENTRY_SIZE = 8
-DIR_HEADER_SIZE = 0x30
-DIR_GEOMETRY_OFF = 0x14
-N_DIRECTION_SLOTS = 8
+IMAG_SET_POINTER_OFFSET = 0x40
+MAX_DIRECTION_COUNT = 8
+MAX_FRAME_COUNT = 128
+MAX_STREAM_COUNT = 256
 
 IMAGE_SET_NAMES = {
     1: "Walk",
@@ -493,57 +494,110 @@ def image_set_base_id(set_id: int) -> int:
     return base_id if base_id else set_id
 
 
-def parse_directional_frame_descriptor(blob: bytes, rel_off: int) -> list[dict[str, object]]:
-    if rel_off + 0x38 + (N_DIRECTION_SLOTS * 4) > len(blob):
+def parse_directional_frame_descriptor(
+    blob: bytes,
+    rel_off: int,
+    next_off: int | None = None,
+) -> list[dict[str, object]]:
+    """Parse the stock ordered direction/stream/frame table for one IMAG set.
+
+    The descriptor owns its direction count at +0x00 and its relative direction
+    pointers at +0x40. Each direction's count word stores playback frames in
+    the high half and coupled streams in the low half. Stock places the stream
+    table at the end of the direction block; everything between the count word
+    and that table is control metadata, not a fixed-size header.
+
+    Returning an empty list is intentional for directionless/interface set
+    families, which have separate readers below.
+    """
+    set_end = len(blob) if next_off is None else next_off
+    if (
+        rel_off < 0
+        or set_end <= rel_off
+        or set_end > len(blob)
+        or rel_off + IMAG_SET_POINTER_OFFSET + 4 > set_end
+    ):
         return []
 
-    raw_offsets = [i32(blob, rel_off + 0x38 + slot * 4) for slot in range(N_DIRECTION_SLOTS)]
-    populated = [(slot, offset) for slot, offset in enumerate(raw_offsets) if offset > 0]
+    direction_count = u32(blob, rel_off)
+    pointer_end = rel_off + IMAG_SET_POINTER_OFFSET + direction_count * 4
+    if direction_count <= 0 or direction_count > MAX_DIRECTION_COUNT or pointer_end > set_end:
+        return []
+
+    direction_offsets = [
+        u32(blob, rel_off + IMAG_SET_POINTER_OFFSET + order * 4)
+        for order in range(direction_count)
+    ]
+    if direction_offsets != sorted(direction_offsets) or len(set(direction_offsets)) != len(direction_offsets):
+        return []
+    if any(relative < IMAG_SET_POINTER_OFFSET + direction_count * 4 for relative in direction_offsets):
+        return []
+
     directions: list[dict[str, object]] = []
 
-    for idx, (slot, dir_rel) in enumerate(populated):
-        dir_off = rel_off + dir_rel
-        if dir_off + DIR_GEOMETRY_OFF + 8 > len(blob):
-            continue
-        x_off = i16(blob, dir_off + DIR_GEOMETRY_OFF)
-        y_off = i16(blob, dir_off + DIR_GEOMETRY_OFF + 2)
-        width = u16(blob, dir_off + DIR_GEOMETRY_OFF + 4)
-        height = u16(blob, dir_off + DIR_GEOMETRY_OFF + 6)
+    for order, relative_offset in enumerate(direction_offsets):
+        direction_start = rel_off + relative_offset
+        direction_end = (
+            rel_off + direction_offsets[order + 1]
+            if order + 1 < len(direction_offsets)
+            else set_end
+        )
+        if direction_start + 8 > direction_end:
+            return []
 
-        if idx + 1 < len(populated):
-            next_dir_off = rel_off + populated[idx + 1][1]
-            frame_count = (next_dir_off - dir_off - DIR_HEADER_SIZE) // 8
-        else:
-            frame_count = 0
-            for frame in range(128):
-                pair_off = dir_off + DIR_HEADER_SIZE + frame * 8
-                if pair_off + 8 > len(blob):
-                    break
-                flag = u32(blob, pair_off)
-                tile_idx = u32(blob, pair_off + 4)
-                if flag == 0 and 0 < tile_idx < 500000:
-                    frame_count += 1
-                    continue
-                break
+        count_word = u32(blob, direction_start + 4)
+        frame_count = count_word >> 16
+        stream_count = count_word & 0xFFFF
+        frame_start = direction_end - frame_count * stream_count * 8
+        if (
+            frame_count <= 0
+            or frame_count > MAX_FRAME_COUNT
+            or stream_count <= 0
+            or stream_count > MAX_STREAM_COUNT
+            or frame_start < direction_start + 8
+            or (frame_start - direction_start) % 4
+        ):
+            return []
 
-        if frame_count <= 0 or frame_count > 128:
-            continue
-
-        tile_indices: list[int] = []
-        for frame in range(frame_count):
-            pair_off = dir_off + DIR_HEADER_SIZE + frame * 8
-            if pair_off + 8 > len(blob):
-                break
-            tile_indices.append(u32(blob, pair_off + 4))
+        streams: list[dict[str, object]] = []
+        for stream_order in range(stream_count):
+            stream_start = frame_start + stream_order * frame_count * 8
+            metadata_words: list[int] = []
+            reference_words: list[int] = []
+            tile_indices: list[int] = []
+            for frame_order in range(frame_count):
+                pair_off = stream_start + frame_order * 8
+                metadata_word = u32(blob, pair_off)
+                reference_word = u32(blob, pair_off + 4)
+                metadata_words.append(metadata_word)
+                reference_words.append(reference_word)
+                # Stock stores flags in the high half. The low half is the
+                # direct positional TILE reference used for rendering.
+                tile_indices.append(reference_word & 0xFFFF)
+            streams.append(
+                {
+                    "stream": stream_order,
+                    "tile_indices": tile_indices,
+                    "metadata_words": metadata_words,
+                    "reference_words": reference_words,
+                }
+            )
 
         directions.append(
             {
-                "slot": slot,
-                "x_off": x_off,
-                "y_off": y_off,
-                "width": width,
-                "height": height,
-                "tile_indices": tile_indices,
+                "slot": order,
+                "x_off": i16(blob, direction_start),
+                "y_off": i16(blob, direction_start + 2),
+                "frame_count": frame_count,
+                "stream_count": stream_count,
+                "count_word": count_word,
+                "control_words": [
+                    u32(blob, offset)
+                    for offset in range(direction_start + 8, frame_start, 4)
+                ],
+                "streams": streams,
+                # Backwards-compatible body-stream view used by the sheet tool.
+                "tile_indices": streams[0]["tile_indices"],
             }
         )
 
@@ -908,12 +962,13 @@ def tile_to_category_image(
 ) -> Image.Image | None:
     """Decode a TILE using cleanup semantics appropriate to its output role."""
     preserve_full_palette = should_preserve_full_palette(category)
+    preserve_stored_pixels = not clean_art
     return tile_to_image(
         tile_data,
         palette_section,
         clean_art=clean_art and not preserve_full_palette,
-        preserve_full_palette=preserve_full_palette,
-        force_opaque_palette=category.startswith("profile_art/"),
+        preserve_full_palette=preserve_full_palette or preserve_stored_pixels,
+        force_opaque_palette=preserve_stored_pixels or category.startswith("profile_art/"),
         recover_enclosed_transparency=should_recover_enclosed_transparency(category),
     )
 
@@ -1098,44 +1153,53 @@ def export_imag_record(
         export_category = classify_main_sprite_set(category, set_id, full)
         if export_category is None:
             continue
-        record_dir = output_root / export_category / folder_name
-        directions = parse_directional_frame_descriptor(record.data, rel_off)
+        record_dir = output_root / export_category / safe_name(source_label) / folder_name
+        next_off = image_sets[set_index + 1][2] if set_index + 1 < len(image_sets) else len(record.data)
+        directions = parse_directional_frame_descriptor(record.data, rel_off, next_off)
         directional_written = 0
         for direction in directions:
             slot = int(direction["slot"])
-            for frame_index, tile_index in enumerate(direction["tile_indices"]):
-                if not full and frame_index > 0:
-                    continue
-                if tile_index < 0 or tile_index >= len(tile_section.entries):
-                    continue
-                image = tile_to_category_image(
-                    tile_section.entries[tile_index].data,
-                    splt_section,
-                    export_category,
-                    clean_art=clean_art,
-                )
-                if image is None:
-                    continue
-                record_dir.mkdir(parents=True, exist_ok=True)
-                file_name = f"{safe_name(set_name)}_dir{slot}_frame{frame_index:03d}_tile{tile_index:05d}.png"
-                out_path = record_dir / file_name
-                image.save(out_path)
-                manifest.append(
-                    {
-                        "category": export_category,
-                        "source": source_label,
-                        "image_id": record.display_name[:4],
-                        "record": record.display_name,
-                        "display_name": catalog_entry.description if catalog_entry else record.display_name[4:],
-                        "set": set_name,
-                        "direction": slot,
-                        "frame": frame_index,
-                        "tile_index": tile_index,
-                        "png": out_path.relative_to(output_root).as_posix(),
-                    }
-                )
-                written += 1
-                directional_written += 1
+            streams = list(direction["streams"])
+            for stream in streams:
+                stream_order = int(stream["stream"])
+                for frame_index, tile_index in enumerate(stream["tile_indices"]):
+                    if not full and frame_index > 0:
+                        continue
+                    if tile_index < 0 or tile_index >= len(tile_section.entries):
+                        continue
+                    image = tile_to_category_image(
+                        tile_section.entries[tile_index].data,
+                        splt_section,
+                        export_category,
+                        clean_art=clean_art,
+                    )
+                    if image is None:
+                        continue
+                    record_dir.mkdir(parents=True, exist_ok=True)
+                    stream_part = f"_stream{stream_order}" if len(streams) > 1 else ""
+                    file_name = (
+                        f"{safe_name(set_name)}_dir{slot}{stream_part}_frame{frame_index:03d}"
+                        f"_tile{tile_index:05d}.png"
+                    )
+                    out_path = record_dir / file_name
+                    image.save(out_path)
+                    manifest.append(
+                        {
+                            "category": export_category,
+                            "source": source_label,
+                            "image_id": record.display_name[:4],
+                            "record": record.display_name,
+                            "display_name": catalog_entry.description if catalog_entry else record.display_name[4:],
+                            "set": set_name,
+                            "direction": slot,
+                            "stream": stream_order,
+                            "frame": frame_index,
+                            "tile_index": tile_index,
+                            "png": out_path.relative_to(output_root).as_posix(),
+                        }
+                    )
+                    written += 1
+                    directional_written += 1
         if directional_written == 0:
             next_off = image_sets[set_index + 1][2] if set_index + 1 < len(image_sets) else len(record.data)
             if category.startswith("buildings/") and export_category == category:
@@ -1201,7 +1265,7 @@ def write_images(
     manifest: list[dict[str, object]],
     folder_name: str,
 ) -> int:
-    record_dir = output_root / category / folder_name
+    record_dir = output_root / category / safe_name(source_label) / folder_name
     written = 0
     for variant_index, (tile_index, image) in enumerate(images):
         record_dir.mkdir(parents=True, exist_ok=True)
@@ -1241,19 +1305,13 @@ def export_interface_record(
         return 0
 
     folder_name = safe_name(record.display_name)
-    record_dir = output_root / category / folder_name
+    record_dir = output_root / category / safe_name(source_label) / folder_name
     written = 0
-    # Full-screen presentation palettes use the high index range as ordinary
-    # sepia/menu colors. Treating 247+ as sprite shadow controls punches holes
-    # through paintings, maps, and menu backgrounds.
-    preserve_full_palette = should_preserve_full_palette(category)
-    effective_clean_art = clean_art and not preserve_full_palette
-
     for set_index, (set_id, set_name, rel_off) in enumerate(image_sets):
         next_off = image_sets[set_index + 1][2] if set_index + 1 < len(image_sets) else len(record.data)
         images = interface_images_for_set(
             record.data, rel_off, next_off, category, tile_section,
-            palette_section, clean_art=effective_clean_art,
+            palette_section, clean_art=clean_art,
         )
         for variant_index, (tile_index, image) in enumerate(images):
             record_dir.mkdir(parents=True, exist_ok=True)
@@ -1596,7 +1654,7 @@ def export_presentation_art(
             else:
                 frames = decode_bink_samples(record.data, ffmpeg)
 
-            record_dir = output_root / category / safe_name(f"{source_label}_{record.display_name}")
+            record_dir = output_root / category / safe_name(source_label) / safe_name(record.display_name)
             record_dir.mkdir(parents=True, exist_ok=True)
 
             if category == "cinematics":
@@ -1664,7 +1722,7 @@ def expected_tile_opaque_pixels(
     as treating an explicitly stored TILE v3 palette index zero as a gap.
     """
     version = u16(tile_data, 0) if len(tile_data) >= 2 else 0
-    preserve_full_palette = should_preserve_full_palette(category)
+    preserve_full_palette = should_preserve_full_palette(category) or not clean_art
 
     if version == 3:
         palette_mode = u16(tile_data, 20) if len(tile_data) >= 26 else 0
@@ -1712,7 +1770,7 @@ def expected_tile_opaque_pixels(
 
     pixels = tile_data[26 : 26 + height * row_stride]
     transparent_index = u16(tile_data, 16) & 0xFF
-    if category.startswith("profile_art/"):
+    if not clean_art or category.startswith("profile_art/"):
         transparent_offsets: set[int] = set()
     elif should_recover_enclosed_transparency(category):
         transparent_offsets = edge_connected_index_offsets(
@@ -1764,7 +1822,13 @@ def audit_extracted_tile_occupancy(
 
     checked = 0
     failures: list[str] = []
+    seen_output_paths: set[str] = set()
     for row in manifest:
+        manifest_path = str(row.get("png", ""))
+        if manifest_path in seen_output_paths:
+            failures.append(f"{manifest_path}: more than one source frame targets this output path")
+            continue
+        seen_output_paths.add(manifest_path)
         tile_value = row.get("tile_index", "")
         source_value = str(row.get("source", ""))
         if tile_value in {"", None} or source_value not in sources:
@@ -1783,7 +1847,7 @@ def audit_extracted_tile_occupancy(
         if expected is None:
             failures.append(f"{row.get('png')}: could not independently count source TILE {tile_index}")
             continue
-        output_path = output_root / str(row["png"])
+        output_path = output_root / manifest_path
         if not output_path.exists():
             failures.append(f"{row.get('png')}: output PNG is missing")
             continue
@@ -2058,7 +2122,10 @@ def is_inside(path: Path, parent: Path) -> bool:
 
 def write_manifest(output_root: Path, manifest: list[dict[str, object]]) -> None:
     path = output_root / "_manifest.csv"
-    fieldnames = ["category", "source", "image_id", "record", "display_name", "set", "direction", "frame", "tile_index", "png"]
+    fieldnames = [
+        "category", "source", "image_id", "record", "display_name", "set",
+        "direction", "stream", "frame", "tile_index", "png",
+    ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -2066,7 +2133,7 @@ def write_manifest(output_root: Path, manifest: list[dict[str, object]]) -> None
 
 
 def create_previews(output_root: Path, manifest: list[dict[str, object]]) -> int:
-    groups: dict[tuple[str, str], list[dict[str, object]]] = {}
+    groups: dict[tuple[str, str, str], list[dict[str, object]]] = {}
     preview_categories = {
         "heroes/sprites",
         "monsters/sprites",
@@ -2079,10 +2146,10 @@ def create_previews(output_root: Path, manifest: list[dict[str, object]]) -> int
         category = str(row["category"])
         if category not in preview_categories:
             continue
-        groups.setdefault((category, str(row["record"])), []).append(row)
+        groups.setdefault((category, str(row["source"]), str(row["record"])), []).append(row)
 
     written = 0
-    for (category, record), rows in groups.items():
+    for (category, source, record), rows in groups.items():
         images = []
         for row in rows:
             path = output_root / str(row["png"])
@@ -2098,7 +2165,7 @@ def create_previews(output_root: Path, manifest: list[dict[str, object]]) -> int
         if not selected_images:
             continue
         preview = build_contact_sheet(selected_images)
-        out_dir = output_root / "_previews" / category
+        out_dir = output_root / "_previews" / category / safe_name(source)
         out_dir.mkdir(parents=True, exist_ok=True)
         preview.save(out_dir / f"{safe_name(record)}.png")
         written += 1
@@ -2107,11 +2174,11 @@ def create_previews(output_root: Path, manifest: list[dict[str, object]]) -> int
 
 def create_guide_art(output_root: Path, manifest: list[dict[str, object]]) -> int:
     written = 0
-    by_record: dict[str, list[dict[str, object]]] = {}
+    by_record: dict[tuple[str, str], list[dict[str, object]]] = {}
     for row in manifest:
-        by_record.setdefault(str(row["record"]), []).append(row)
+        by_record.setdefault((str(row["source"]), str(row["record"])), []).append(row)
 
-    for record, rows in by_record.items():
+    for (source, record), rows in by_record.items():
         profile_row = pick_guide_profile(rows)
         sprite_row = pick_guide_sprite(rows)
         for label, row in (("profiles", profile_row), ("sprites", sprite_row)):
@@ -2126,12 +2193,12 @@ def create_guide_art(output_root: Path, manifest: list[dict[str, object]]) -> in
                 continue
             image = scale_guide_image(image)
             group = guide_group(str(row["category"]))
-            out_dir = output_root / "guide_art" / label / group
+            out_dir = output_root / "guide_art" / label / group / safe_name(source)
             out_dir.mkdir(parents=True, exist_ok=True)
             image.save(out_dir / f"{safe_name(record)}.png")
             written += 1
             if label == "sprites":
-                card_dir = output_root / "guide_art" / "sprite_cards" / group
+                card_dir = output_root / "guide_art" / "sprite_cards" / group / safe_name(source)
                 card_dir.mkdir(parents=True, exist_ok=True)
                 sprite_card(image, str(row["category"])).save(card_dir / f"{safe_name(record)}.png")
                 written += 1
@@ -2296,6 +2363,9 @@ def preview_cell_label(row: dict[str, object]) -> str:
     direction = str(row.get("direction", "")).strip()
     if direction:
         parts.append(f"d{direction}")
+    stream = str(row.get("stream", "")).strip()
+    if stream and stream != "0":
+        parts.append(f"s{stream}")
     frame = str(row.get("frame", "")).strip()
     if frame:
         parts.append(f"f{frame}")
