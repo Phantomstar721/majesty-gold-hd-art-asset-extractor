@@ -9,8 +9,12 @@ folder that disappears.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+
+APP_DATA_FOLDER = "Majesty Gold HD Art Extractor"
 
 
 def is_frozen() -> bool:
@@ -22,3 +26,16 @@ def tool_root() -> Path:
     if is_frozen():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
+
+
+def user_data_root() -> Path:
+    """A stable, per-user folder for files the program downloads.
+
+    A subscribed Workshop folder is managed by Steam and may be read-only or
+    replaced during an update.  A PyInstaller one-file bundle also runs from a
+    disposable ``_MEI`` directory.  Neither is an appropriate home for FFmpeg.
+    """
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / APP_DATA_FOLDER
+    return Path.home() / f".{APP_DATA_FOLDER.lower().replace(' ', '-')}"

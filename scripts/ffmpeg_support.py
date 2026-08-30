@@ -17,23 +17,53 @@ import os
 import shutil
 import subprocess
 import zipfile
-from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from pathlib import Path, PurePosixPath
+from typing import Callable, Iterable, NamedTuple, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
-from app_paths import tool_root
+from app_paths import user_data_root
 
-TOOL_ROOT = tool_root()
-FFMPEG_DIR = TOOL_ROOT / "tools" / "ffmpeg"
+FFMPEG_DIR = user_data_root() / "ffmpeg"
 FFMPEG_EXE = FFMPEG_DIR / "ffmpeg.exe"
 
-# gyan.dev is the build the FFmpeg project itself points Windows users to. The
-# archive is served over HTTPS and published with a companion .sha256, which is
-# downloaded first and used to verify the zip before anything is unpacked or
-# run. That is the same trust model as fetching it by hand, made explicit.
-FFMPEG_HOME = "https://www.gyan.dev/ffmpeg/builds/"
-FFMPEG_URL = FFMPEG_HOME + "ffmpeg-release-essentials.zip"
-FFMPEG_SHA_URL = FFMPEG_URL + ".sha256"
-FFMPEG_APPROX_MB = 30
+class DownloadSource(NamedTuple):
+    name: str
+    url: str
+    checksum_url: str
+    checksum_filename: str
+    approximate_mb: int
+
+
+# FFmpeg's own download page recommends both of these Windows build providers.
+# GitHub's release CDN is dramatically faster in observed use, so BtbN is the
+# primary.  Its shared GPL build is smaller than the static build and includes
+# libx264, which the cinematic exporter uses.  Gyan remains a static fallback.
+BTBN_HOME = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+BTBN_ARCHIVE_NAME = "ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip"
+BTBN_SOURCE = DownloadSource(
+    "GitHub / BtbN",
+    BTBN_HOME + BTBN_ARCHIVE_NAME,
+    BTBN_HOME + "checksums.sha256",
+    BTBN_ARCHIVE_NAME,
+    75,
+)
+GYAN_HOME = "https://www.gyan.dev/ffmpeg/builds/"
+GYAN_ARCHIVE_NAME = "ffmpeg-release-essentials.zip"
+GYAN_SOURCE = DownloadSource(
+    "gyan.dev",
+    GYAN_HOME + GYAN_ARCHIVE_NAME,
+    GYAN_HOME + GYAN_ARCHIVE_NAME + ".sha256",
+    GYAN_ARCHIVE_NAME,
+    110,
+)
+DOWNLOAD_SOURCES = (BTBN_SOURCE, GYAN_SOURCE)
+
+# Public aliases retained for the prompt, CLI documentation, and callers that
+# display the chosen primary source.
+FFMPEG_URL = BTBN_SOURCE.url
+FFMPEG_SHA_URL = BTBN_SOURCE.checksum_url
+FFMPEG_APPROX_MB = BTBN_SOURCE.approximate_mb
 
 
 class FFmpegUnavailable(RuntimeError):
@@ -84,9 +114,10 @@ def describe_download() -> str:
     return (
         f"Cinematics and quest maps are Bink video and need FFmpeg, "
         f"which is not part of this tool.\n\n"
-        f"It would be downloaded from:\n  {FFMPEG_URL}\n\n"
+        f"It would be downloaded from GitHub's release CDN:\n  {FFMPEG_URL}\n\n"
         f"About {FFMPEG_APPROX_MB} MB, verified against the publisher's SHA-256, "
         f"and unpacked to:\n  {FFMPEG_DIR}\n\n"
+        f"If GitHub is unavailable, {GYAN_SOURCE.name} is tried automatically.\n\n"
         f"Nothing else on your machine is touched, and you can delete that "
         f"folder at any time.\n\n"
         f"Download it now?"
@@ -95,32 +126,71 @@ def describe_download() -> str:
 
 def download_ffmpeg(progress: Callable[[str], None] | None = None) -> Path:
     """Fetch, verify and unpack FFmpeg. Returns the executable path."""
-    # Imported here so the module stays importable on a machine with no network
-    # stack configured, and so the import cost is not paid by every run.
-    from urllib.request import urlopen
-
     def say(message: str) -> None:
         if progress:
             progress(message)
 
-    FFMPEG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        FFMPEG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise FFmpegUnavailable(
+            "The FFmpeg folder could not be created.\n\n"
+            f"{FFMPEG_DIR}\n\n{error}"
+        ) from error
+    failures: list[str] = []
+    for index, source in enumerate(DOWNLOAD_SOURCES):
+        try:
+            return _download_from_source(source, say)
+        except FFmpegUnavailable as error:
+            failures.append(f"{source.name}: {error}")
+            if index + 1 < len(DOWNLOAD_SOURCES):
+                say(f"{source.name} failed; trying {DOWNLOAD_SOURCES[index + 1].name}")
+    raise FFmpegUnavailable(
+        "FFmpeg could not be downloaded from any provider.\n\n" + "\n\n".join(failures)
+    )
+
+
+def _download_from_source(source: DownloadSource, say: Callable[[str], None]) -> Path:
     archive = FFMPEG_DIR / "ffmpeg-download.zip"
 
-    say(f"Fetching checksum from {FFMPEG_SHA_URL}")
-    with urlopen(FFMPEG_SHA_URL, timeout=60) as response:  # noqa: S310 -- pinned HTTPS host
-        expected = response.read().decode("ascii", "ignore").split()[0].strip().lower()
+    try:
+        say(f"Fetching {source.name} checksum")
+        with urlopen(source.checksum_url, timeout=60) as response:  # noqa: S310 -- fixed HTTPS providers
+            checksum_text = response.read().decode("ascii", "ignore")
+    except (HTTPError, URLError, TimeoutError, OSError) as error:
+        raise FFmpegUnavailable(_download_error_message(source, "checksum", error)) from error
+    expected = _checksum_for(checksum_text, source.checksum_filename)
     if len(expected) != 64:
-        raise FFmpegUnavailable(f"Publisher checksum looked wrong: {expected!r}")
+        raise FFmpegUnavailable(
+            f"The checksum manifest did not contain {source.checksum_filename}."
+        )
 
-    say(f"Downloading FFmpeg (about {FFMPEG_APPROX_MB} MB)")
+    say(f"Downloading FFmpeg from {source.name} (about {source.approximate_mb} MB)")
     digest = hashlib.sha256()
-    with urlopen(FFMPEG_URL, timeout=300) as response, archive.open("wb") as handle:  # noqa: S310
-        while True:
-            block = response.read(1 << 16)
-            if not block:
-                break
-            digest.update(block)
-            handle.write(block)
+    downloaded = 0
+    next_report = 5 << 20
+    try:
+        with urlopen(source.url, timeout=300) as response, archive.open("wb") as handle:  # noqa: S310
+            try:
+                total = int(response.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                total = 0
+            while True:
+                block = response.read(1 << 16)
+                if not block:
+                    break
+                digest.update(block)
+                handle.write(block)
+                downloaded += len(block)
+                if downloaded >= next_report:
+                    amount = f"Downloaded {downloaded / (1 << 20):.0f} MB"
+                    if total > 0:
+                        amount += f" of {total / (1 << 20):.0f} MB"
+                    say(amount)
+                    next_report += 5 << 20
+    except (HTTPError, URLError, TimeoutError, OSError) as error:
+        archive.unlink(missing_ok=True)
+        raise FFmpegUnavailable(_download_error_message(source, "archive", error)) from error
 
     actual = digest.hexdigest().lower()
     if actual != expected:
@@ -132,16 +202,48 @@ def download_ffmpeg(progress: Callable[[str], None] | None = None) -> Path:
     say("Checksum verified")
 
     say("Unpacking")
-    extracted = _extract_ffmpeg(archive)
-    archive.unlink(missing_ok=True)
+    try:
+        extracted = _extract_ffmpeg(archive)
+    except (OSError, zipfile.BadZipFile) as error:
+        raise FFmpegUnavailable(f"The verified FFmpeg archive could not be unpacked.\n\n{error}") from error
+    finally:
+        archive.unlink(missing_ok=True)
     if extracted is None:
         raise FFmpegUnavailable("The archive did not contain ffmpeg.exe")
     say(f"FFmpeg ready at {extracted}")
     return extracted
 
 
+def _checksum_for(text: str, filename: str) -> str:
+    """Read either a one-line checksum or a multi-file SHA-256 manifest."""
+    for line in text.splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if not fields:
+            continue
+        digest = fields[0].lower()
+        if len(fields) == 1:
+            return digest
+        listed_name = fields[1].lstrip("* ").replace("\\", "/")
+        if PurePosixPath(listed_name).name.lower() == filename.lower():
+            return digest
+    return ""
+
+
+def _download_error_message(
+    source: DownloadSource, part: str, error: BaseException
+) -> str:
+    return (
+        f"Could not download the FFmpeg {part} from {source.name}.\n\n"
+        f"{source.url}\n\n"
+        f"{error}\n\n"
+        "Check the internet connection and try again. You can also download "
+        "a static Windows FFmpeg build manually and place ffmpeg.exe here:\n"
+        f"{FFMPEG_EXE}"
+    )
+
+
 def _extract_ffmpeg(archive: Path) -> Path | None:
-    """Pull just ffmpeg.exe out of the archive, ignoring its folder layout."""
+    """Install ffmpeg.exe and any sibling DLLs, ignoring archive layout."""
     with zipfile.ZipFile(archive) as bundle:
         member = next(
             (
@@ -153,10 +255,26 @@ def _extract_ffmpeg(archive: Path) -> Path | None:
         )
         if member is None:
             return None
-        # Read and write explicitly rather than extract(), so nothing in the
-        # archive can choose its own path on disk.
-        with bundle.open(member) as source, FFMPEG_EXE.open("wb") as target:
-            shutil.copyfileobj(source, target)
+        binary_dir = PurePosixPath(member).parent
+        dll_members = [
+            name
+            for name in bundle.namelist()
+            if PurePosixPath(name).parent == binary_dir
+            and PurePosixPath(name).suffix.lower() == ".dll"
+        ]
+        # DLLs are committed first and ffmpeg.exe last.  An interrupted shared
+        # install therefore cannot look complete to find_ffmpeg(); the next run
+        # safely overwrites any partial DLL set.  We write by basename rather
+        # than extract(), so archive paths never select a destination.
+        for name in [*dll_members, member]:
+            destination = FFMPEG_DIR / PurePosixPath(name).name
+            partial = destination.with_name(destination.name + ".part")
+            try:
+                with bundle.open(name) as source_file, partial.open("wb") as target:
+                    shutil.copyfileobj(source_file, target)
+                partial.replace(destination)
+            finally:
+                partial.unlink(missing_ok=True)
     return FFMPEG_EXE
 
 

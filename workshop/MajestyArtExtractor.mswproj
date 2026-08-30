@@ -1,0 +1,9 @@
+<Majesty>
+	<SteamWorkshop id="3778369853" visibility="Private">
+		<Title lang="en_US">Majesty Gold HD Art Extractor</Title>
+		<Description lang="en_US">Standalone utility that extracts organised PNG art from your own installed copy of Majesty Gold HD. Open the subscribed item folder and run Majesty Art Extractor.exe. Includes no game assets and does not modify the game.</Description>
+		<ContentPath>C:\Users\bterr\source\repos\majesty-gold-hd-art-asset-extractor\dist\workshop-upload\content</ContentPath>
+		<PreviewImagePath>C:\Users\bterr\source\repos\majesty-gold-hd-art-asset-extractor\workshop\workshop-preview.jpg</PreviewImagePath>
+		<IDTag>Mod</IDTag>
+	</SteamWorkshop>
+</Majesty>

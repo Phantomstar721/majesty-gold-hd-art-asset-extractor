@@ -872,41 +872,78 @@ class ExtractorApp:
             ):
                 return
 
-        # Settled before the worker starts so the download prompt happens on
-        # the UI thread, where a dialog belongs.
-        ffmpeg = self._resolve_ffmpeg()
-        if ffmpeg is None and self.cinematics_var.get():
-            if not messagebox.askyesno(
-                "Continue without cinematics?",
-                "Cinematics and quest map animations will be skipped.\n\n"
-                "Every other category, including segues and interface maps, "
-                "extracts normally. Continue?",
-            ):
+        # The consent dialog belongs on the UI thread; the network transfer
+        # does not.  Running urlopen here used to freeze every repaint until a
+        # 100+ MB download (or a long timeout) finished, making the button
+        # appear to have done nothing.
+        mode = ExtractionMode(self.mode_var.get())
+        if self.cinematics_var.get():
+            ffmpeg = ffmpeg_support.find_ffmpeg()
+            if ffmpeg is not None:
+                self._begin_extraction(game, output, mode, ffmpeg)
                 return
+            if messagebox.askyesno("Download FFmpeg?", ffmpeg_support.describe_download()):
+                self._begin_ffmpeg_download(game, output, mode)
+                return
+            if not self._confirm_without_cinematics():
+                return
+        self._begin_extraction(game, output, mode, None)
 
+    def _begin_extraction(
+        self, game: Path, output: Path, mode: ExtractionMode, ffmpeg: Path | None
+    ) -> None:
         self.running = True
         self._set_inputs_enabled(False)
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
         self.progress.configure(value=0)
         self.status_var.set("Preparing…")
         self.status_label.configure(foreground=COLORS["gold"])
         self._append_log("\n— Starting extraction —\n")
-        mode = ExtractionMode(self.mode_var.get())
         threading.Thread(
             target=self._extract_worker, args=(game, output, mode, ffmpeg), daemon=True
         ).start()
 
-    def _resolve_ffmpeg(self) -> Path | None:
-        if not self.cinematics_var.get():
-            return None
+    def _begin_ffmpeg_download(
+        self, game: Path, output: Path, mode: ExtractionMode
+    ) -> None:
+        self.running = True
+        self._set_inputs_enabled(False)
+        self.progress.configure(mode="indeterminate", value=0)
+        self.progress.start(12)
+        self.status_var.set("Downloading FFmpeg…")
+        self.status_label.configure(foreground=COLORS["gold"])
+        self._append_log("\n— Setting up FFmpeg —\n")
+        threading.Thread(
+            target=self._ffmpeg_download_worker,
+            args=(game, output, mode),
+            daemon=True,
+        ).start()
+
+    def _ffmpeg_download_worker(
+        self, game: Path, output: Path, mode: ExtractionMode
+    ) -> None:
+        def report(message: str) -> None:
+            self.messages.put(("ffmpeg_progress", message))
+
         try:
-            return ffmpeg_support.resolve_ffmpeg(
-                allow_download=True,
-                confirm=lambda message: messagebox.askyesno("Download FFmpeg?", message),
-                progress=self._append_log,
+            ffmpeg = ffmpeg_support.download_ffmpeg(progress=report)
+            self.messages.put(
+                ("ffmpeg_ready", (game, output, mode, ffmpeg))
             )
-        except ffmpeg_support.FFmpegUnavailable as error:
-            messagebox.showerror("FFmpeg could not be set up", str(error))
-            return None
+        except Exception as error:  # Worker boundary: hand all failures to Tk.
+            self.messages.put(
+                ("ffmpeg_error", (game, output, mode, str(error)))
+            )
+
+    @staticmethod
+    def _confirm_without_cinematics() -> bool:
+        return messagebox.askyesno(
+            "Continue without cinematics?",
+            "Cinematics and quest map animations will be skipped.\n\n"
+            "Every other category, including segues and interface maps, "
+            "extracts normally. Continue?",
+        )
 
     def _set_inputs_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -948,6 +985,22 @@ class ExtractorApp:
                 if kind == "log":
                     self._append_log(str(payload))
                     self._advance_progress(str(payload))
+                elif kind == "ffmpeg_progress":
+                    message = str(payload)
+                    self.status_var.set(message)
+                    self._append_log(message + "\n")
+                elif kind == "ffmpeg_ready":
+                    game, output, mode, ffmpeg = payload
+                    self._append_log(f"FFmpeg ready at {ffmpeg}\n")
+                    self._begin_extraction(game, output, mode, ffmpeg)
+                elif kind == "ffmpeg_error":
+                    game, output, mode, message = payload
+                    self._finish()
+                    self.status_var.set("FFmpeg setup failed · no extraction started")
+                    self.status_label.configure(foreground=COLORS["error"])
+                    messagebox.showerror("FFmpeg could not be set up", message)
+                    if self._confirm_without_cinematics():
+                        self._begin_extraction(game, output, mode, None)
                 elif kind == "done":
                     total, output = payload
                     self._finish()
@@ -972,6 +1025,8 @@ class ExtractorApp:
 
     def _finish(self) -> None:
         self.running = False
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
         self._set_inputs_enabled(True)
         self.refresh_estimate()
 
@@ -1003,8 +1058,9 @@ class ExtractorApp:
 
     def _close(self) -> None:
         if self.running and not messagebox.askyesno(
-            "Extraction is still running",
-            "Closing now will interrupt extraction and may leave a partial output folder. Close anyway?",
+            "Work is still in progress",
+            "Closing now will interrupt FFmpeg setup or extraction and may leave "
+            "a partial download or output folder. Close anyway?",
         ):
             return
         self.root.destroy()

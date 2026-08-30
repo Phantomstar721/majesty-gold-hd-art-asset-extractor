@@ -59,7 +59,11 @@ There is a tick-box for this in the window. It starts switched on if FFmpeg is
 already on your machine, and off otherwise. Switch it on and, if you do not
 have FFmpeg, you are shown the exact address it would be downloaded from, how
 large it is, and where it would be saved, before anything is fetched. Decline
-and the rest of the extraction runs normally.
+and the rest of the extraction runs normally. The download runs in the
+background with visible progress and is saved under your Windows local app-data
+folder, rather than inside Steam's managed Workshop copy. It uses the BtbN
+GitHub release CDN first and automatically falls back to gyan.dev if needed;
+both are Windows build providers linked by FFmpeg's own download page.
 
 Cinematics become playable MP4 videos with their in-game sound, plus twelve
 evenly spaced full-resolution stills and a contact sheet. Quest maps become
@@ -188,7 +192,8 @@ affected:
 | everything else | extracted normally |
 
 FFmpeg already on `PATH`, or named by the `MAJESTY_FFMPEG` environment
-variable, is used automatically.
+variable, is used automatically. A copy fetched by the app is kept at
+`%LOCALAPPDATA%\Majesty Gold HD Art Extractor\ffmpeg\ffmpeg.exe`.
 
 ### This tool only reads
 

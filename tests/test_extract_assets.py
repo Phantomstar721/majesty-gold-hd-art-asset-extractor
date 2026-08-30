@@ -1,16 +1,22 @@
 import ast
+import io
 import os
 from pathlib import Path
+import queue
 import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zlib
+import zipfile
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import app_paths  # noqa: E402
+import extractor_gui  # noqa: E402
 import ffmpeg_support  # noqa: E402
 import imaging  # noqa: E402
 
@@ -807,6 +813,13 @@ class NoConsoleFlashTests(unittest.TestCase):
 
 
 class FFmpegSupportTests(unittest.TestCase):
+    def test_download_location_is_per_user_not_beside_the_executable(self):
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\tester\AppData\Local"}):
+            self.assertEqual(
+                app_paths.user_data_root(),
+                Path(r"C:\Users\tester\AppData\Local\Majesty Gold HD Art Extractor"),
+            )
+
     def test_nothing_is_downloaded_unless_asked(self):
         self.assertIsNone(
             ffmpeg_support.resolve_ffmpeg(
@@ -828,6 +841,7 @@ class FFmpegSupportTests(unittest.TestCase):
         message = ffmpeg_support.describe_download()
         self.assertIn(ffmpeg_support.FFMPEG_URL, message)
         self.assertIn(str(ffmpeg_support.FFMPEG_DIR), message)
+        self.assertIn(ffmpeg_support.GYAN_SOURCE.name, message)
         self.assertTrue(ffmpeg_support.FFMPEG_URL.startswith("https://"))
 
     def test_an_explicit_override_is_honoured(self):
@@ -868,6 +882,136 @@ class FFmpegSupportTests(unittest.TestCase):
             sys.stdin = original_stdin
 
         self.assertEqual(calls, [False, True])
+
+    def test_network_failure_is_actionable_and_removes_partial_archive(self):
+        class InterruptedResponse(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell() > 0:
+                    raise OSError("network unavailable")
+                return super().read(min(size, 1024))
+
+        with tempfile.TemporaryDirectory() as temp:
+            ffmpeg_dir = Path(temp) / "ffmpeg"
+            checksum = io.BytesIO(
+                b"0" * 64 + b"  " + ffmpeg_support.BTBN_ARCHIVE_NAME.encode() + b"\n"
+            )
+            interrupted = InterruptedResponse(b"x" * 2048)
+            interrupted.headers = {}
+            with (
+                mock.patch.object(ffmpeg_support, "FFMPEG_DIR", ffmpeg_dir),
+                mock.patch.object(ffmpeg_support, "FFMPEG_EXE", ffmpeg_dir / "ffmpeg.exe"),
+                mock.patch.object(ffmpeg_support, "DOWNLOAD_SOURCES", (ffmpeg_support.BTBN_SOURCE,)),
+                mock.patch.object(ffmpeg_support, "urlopen", side_effect=[checksum, interrupted]),
+            ):
+                with self.assertRaisesRegex(
+                    ffmpeg_support.FFmpegUnavailable,
+                    "Could not download the FFmpeg archive",
+                ) as raised:
+                    ffmpeg_support.download_ffmpeg()
+
+            self.assertIn("ffmpeg.exe", str(raised.exception))
+            self.assertFalse((ffmpeg_dir / "ffmpeg-download.zip").exists())
+
+    def test_empty_checksum_response_is_reported_cleanly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ffmpeg_dir = Path(temp) / "ffmpeg"
+            with (
+                mock.patch.object(ffmpeg_support, "FFMPEG_DIR", ffmpeg_dir),
+                mock.patch.object(ffmpeg_support, "FFMPEG_EXE", ffmpeg_dir / "ffmpeg.exe"),
+                mock.patch.object(ffmpeg_support, "DOWNLOAD_SOURCES", (ffmpeg_support.BTBN_SOURCE,)),
+                mock.patch.object(ffmpeg_support, "urlopen", return_value=io.BytesIO(b"")),
+            ):
+                with self.assertRaisesRegex(
+                    ffmpeg_support.FFmpegUnavailable,
+                    "checksum manifest did not contain",
+                ):
+                    ffmpeg_support.download_ffmpeg()
+
+    def test_extraction_is_atomic(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            archive = root / "ffmpeg.zip"
+            ffmpeg_dir = root / "installed"
+            ffmpeg_dir.mkdir()
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("ffmpeg-build/bin/ffmpeg.exe", b"valid executable")
+                bundle.writestr("ffmpeg-build/bin/avcodec.dll", b"runtime library")
+                bundle.writestr("ffmpeg-build/bin/ffprobe.exe", b"not required")
+
+            with (
+                mock.patch.object(ffmpeg_support, "FFMPEG_DIR", ffmpeg_dir),
+                mock.patch.object(ffmpeg_support, "FFMPEG_EXE", ffmpeg_dir / "ffmpeg.exe"),
+            ):
+                result = ffmpeg_support._extract_ffmpeg(archive)
+
+            self.assertEqual(result.read_bytes(), b"valid executable")
+            self.assertEqual((ffmpeg_dir / "avcodec.dll").read_bytes(), b"runtime library")
+            self.assertFalse((ffmpeg_dir / "ffprobe.exe").exists())
+            self.assertFalse((ffmpeg_dir / "ffmpeg.exe.part").exists())
+
+    def test_checksum_manifest_selects_the_requested_archive(self):
+        manifest = "\n".join(
+            (
+                "1" * 64 + "  unrelated.zip",
+                "2" * 64 + f"  {ffmpeg_support.BTBN_ARCHIVE_NAME}",
+            )
+        )
+        self.assertEqual(
+            ffmpeg_support._checksum_for(manifest, ffmpeg_support.BTBN_ARCHIVE_NAME),
+            "2" * 64,
+        )
+
+    def test_failed_primary_uses_the_fallback_provider(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ffmpeg_dir = Path(temp) / "ffmpeg"
+            ready = ffmpeg_dir / "ffmpeg.exe"
+            messages = []
+            with (
+                mock.patch.object(ffmpeg_support, "FFMPEG_DIR", ffmpeg_dir),
+                mock.patch.object(ffmpeg_support, "FFMPEG_EXE", ready),
+                mock.patch.object(
+                    ffmpeg_support,
+                    "_download_from_source",
+                    side_effect=[ffmpeg_support.FFmpegUnavailable("primary unavailable"), ready],
+                ) as download,
+            ):
+                result = ffmpeg_support.download_ffmpeg(messages.append)
+
+            self.assertEqual(result, ready)
+            self.assertEqual(
+                [call.args[0] for call in download.call_args_list],
+                [ffmpeg_support.BTBN_SOURCE, ffmpeg_support.GYAN_SOURCE],
+            )
+            self.assertTrue(any("trying gyan.dev" in message for message in messages))
+
+    def test_gui_download_worker_reports_progress_without_touching_tk(self):
+        app = object.__new__(extractor_gui.ExtractorApp)
+        app.messages = queue.Queue()
+
+        def fake_download(progress):
+            progress("Downloaded 5 MB")
+            return Path(r"C:\ffmpeg\ffmpeg.exe")
+
+        with mock.patch.object(ffmpeg_support, "download_ffmpeg", side_effect=fake_download):
+            app._ffmpeg_download_worker(
+                Path(r"C:\game"),
+                Path(r"C:\output"),
+                ExtractionMode.RELEVANT_ART,
+            )
+
+        progress_kind, progress_message = app.messages.get_nowait()
+        ready_kind, ready_payload = app.messages.get_nowait()
+        self.assertEqual((progress_kind, progress_message), ("ffmpeg_progress", "Downloaded 5 MB"))
+        self.assertEqual(ready_kind, "ffmpeg_ready")
+        self.assertEqual(ready_payload[-1], Path(r"C:\ffmpeg\ffmpeg.exe"))
+
+    def test_packager_requires_fixed_bootloader_and_disables_upx(self):
+        source = (SCRIPTS / "Build-Exe.ps1").read_text(encoding="utf-8")
+        self.assertIn('[Version]"6.12.0"', source)
+        self.assertIn('"--noupx"', source)
+        exclusion_block = source.split("# urllib.request", 1)[1].split("$arguments += $entry", 1)[0]
+        self.assertNotIn('"http"', exclusion_block)
+        self.assertNotIn('"email"', exclusion_block)
 
 
 def _directional_set(

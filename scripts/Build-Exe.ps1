@@ -27,6 +27,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildVenv = Join-Path $RepoRoot ".venv-build"
 $Work = Join-Path $RepoRoot ".tmp\pyinstaller"
+$MinimumPyInstaller = [Version]"6.12.0"
 if (-not $OutputDir) { $OutputDir = Join-Path $RepoRoot "dist" }
 
 Write-Host "Majesty Gold HD Art Extractor - executable build"
@@ -67,9 +68,22 @@ if (-not (Test-Path (Join-Path $BuildVenv "Scripts\python.exe"))) {
 }
 $BuildPython = Join-Path $BuildVenv "Scripts\python.exe"
 
-if ((Invoke-Native -FilePath $BuildPython -Arguments @("-c", "import PyInstaller") -Quiet) -ne 0) {
-    Write-Host "Installing PyInstaller into the build environment..."
-    $install = @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "pyinstaller")
+$needsPyInstaller = (Invoke-Native -FilePath $BuildPython -Arguments @("-c", "import PyInstaller") -Quiet) -ne 0
+if (-not $needsPyInstaller) {
+    $installedText = (& $BuildPython -c "import PyInstaller; print(PyInstaller.__version__)" 2>$null | Select-Object -Last 1)
+    try {
+        $needsPyInstaller = [Version]$installedText -lt $MinimumPyInstaller
+    } catch {
+        $needsPyInstaller = $true
+    }
+}
+if ($needsPyInstaller) {
+    Write-Host "Installing a current PyInstaller into the build environment..."
+    # 6.12 includes the modern Windows one-file cleanup fixes.  Older cached
+    # build environments must not silently keep producing the problematic
+    # bootloader forever.
+    $constraint = "pyinstaller>=$MinimumPyInstaller,<7"
+    $install = @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--upgrade", $constraint)
     if ((Invoke-Native -FilePath $BuildPython -Arguments $install -Quiet) -ne 0) {
         throw "Could not install PyInstaller."
     }
@@ -85,6 +99,9 @@ $arguments = @(
     "--noconfirm",
     "--clean",
     "--onefile",
+    # UPX-packed binaries are more likely to attract antivirus inspection,
+    # which can keep a one-file runtime DLL locked during _MEI cleanup.
+    "--noupx",
     # No console: this is double-clicked. The window keeps its own log, and the
     # entry point substitutes a sink for stdout so nothing raises without one.
     "--windowed",
@@ -98,7 +115,10 @@ foreach ($module in @("extract_assets", "extractor_gui", "imaging", "ffmpeg_supp
     $arguments += @("--hidden-import", $module)
 }
 # Nothing here needs these, and they pull in a lot.
-foreach ($module in @("numpy", "PIL", "pytest", "setuptools", "pip", "unittest", "email", "http", "xmlrpc")) {
+# urllib.request imports http.client and email while fetching FFmpeg.  Those
+# modules were once excluded to shave a little space, which made the packaged
+# downloader fail at its first import even though source runs worked.
+foreach ($module in @("numpy", "PIL", "pytest", "setuptools", "pip", "unittest", "xmlrpc")) {
     $arguments += @("--exclude-module", $module)
 }
 $arguments += $entry

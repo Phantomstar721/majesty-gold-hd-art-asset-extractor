@@ -1,0 +1,15 @@
+MAJESTY GOLD HD ART EXTRACTOR
+
+Double-click "Majesty Art Extractor.exe" to begin.
+
+Nothing needs installing: Python and everything required for normal art
+extraction are contained in the EXE. The tool reads your own Majesty Gold HD
+installation and writes PNG files to the folder you choose. It does not modify
+the game.
+
+Cinematics and animated quest maps are optional. They require FFmpeg; if it is
+not already installed, the extractor explains the download and asks permission
+before fetching anything. All other art extracts without FFmpeg.
+
+Source and documentation:
+https://github.com/Phantomstar721/majesty-gold-hd-art-asset-extractor
